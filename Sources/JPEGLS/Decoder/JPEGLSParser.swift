@@ -188,7 +188,14 @@ public final class JPEGLSParser {
             
             switch marker {
             case .endOfImage:
-                // End of JPEG-LS stream
+                // A decoder consumes one complete codestream. Permit only the single
+                // zero byte needed to even-pad an odd stream in DICOM PS3.5 A.4.
+                if reader.bytesRemaining > 0 {
+                    guard reader.currentPosition % 2 == 1, reader.bytesRemaining == 1,
+                          try reader.readByte() == 0 else {
+                        throw JPEGLSError.invalidBitstreamStructure(reason: "Trailing bytes after JPEG-LS EOI")
+                    }
+                }
                 guard let frame = frameHeader else {
                     throw JPEGLSError.invalidBitstreamStructure(
                         reason: "No frame header found before EOI"

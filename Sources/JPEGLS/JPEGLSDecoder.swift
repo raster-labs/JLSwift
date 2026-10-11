@@ -55,8 +55,27 @@ private final class IntervalDecodeResults: @unchecked Sendable {
 /// let pixels = imageData.components[0].pixels
 /// ```
 public struct JPEGLSDecoder: Sendable {
-    /// Initialize decoder
-    public init() {}
+    /// Resource policy applied before marker parsing and sample allocation.
+    public struct Limits: Sendable {
+        /// Maximum compressed input bytes.
+        public let maximumEncodedBytes: Int
+        /// Maximum full-resolution pixels per component.
+        public let maximumPixels: Int
+        /// Maximum bytes in decoded Int sample planes, including all components.
+        public let maximumDecodedBytes: Int
+        /// Creates limits. These defaults bound sample storage to 128 MiB.
+        public init(maximumEncodedBytes: Int = 64 << 20, maximumPixels: Int = 16 << 20,
+                    maximumDecodedBytes: Int = 128 << 20) {
+            self.maximumEncodedBytes = maximumEncodedBytes
+            self.maximumPixels = maximumPixels
+            self.maximumDecodedBytes = maximumDecodedBytes
+        }
+    }
+
+    private let limits: Limits
+
+    /// Initializes a decoder with caller-selected allocation limits.
+    public init(limits: Limits = Limits()) { self.limits = limits }
     
     /// Decode JPEG-LS data to pixel data
     ///
@@ -81,6 +100,9 @@ public struct JPEGLSDecoder: Sendable {
     /// - Returns: Decoded multi-component image data
     /// - Throws: `JPEGLSError` if decoding fails
     public func decode(_ data: Data) throws -> MultiComponentImageData {
+        guard data.count <= limits.maximumEncodedBytes else {
+            throw JPEGLSError.invalidBitstreamStructure(reason: "JPEG-LS exceeds encoded byte limit")
+        }
         // Rebase slices: all offset bookkeeping below (parser scan ranges,
         // the fallback marker walk) is zero-based, but a Data slice keeps
         // its parent's indices — subscripting it with zero-based ranges
@@ -113,9 +135,12 @@ public struct JPEGLSDecoder: Sendable {
         // arithmetic runs on them (a crafted LSE type-4 segment can declare
         // axes up to 2^32 − 1 each).
         let frameHeader = parseResult.frameHeader
-        let (_, dimensionOverflow) = frameHeader.width.multipliedReportingOverflow(by: frameHeader.height)
-        guard !dimensionOverflow else {
-            throw JPEGLSError.invalidDimensions(width: frameHeader.width, height: frameHeader.height)
+        let (pixels, dimensionOverflow) = frameHeader.width.multipliedReportingOverflow(by: frameHeader.height)
+        let (samples, sampleOverflow) = pixels.multipliedReportingOverflow(by: frameHeader.componentCount)
+        let (bytes, byteOverflow) = samples.multipliedReportingOverflow(by: MemoryLayout<Int>.stride)
+        guard !dimensionOverflow, !sampleOverflow, !byteOverflow,
+              pixels > 0, pixels <= limits.maximumPixels, bytes <= limits.maximumDecodedBytes else {
+            throw JPEGLSError.invalidBitstreamStructure(reason: "JPEG-LS exceeds decoded pixel/byte limit")
         }
 
         // Slice scan data using the ranges the parser recorded during its
