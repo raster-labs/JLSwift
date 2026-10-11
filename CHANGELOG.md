@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-10-12
+
+### Fixed
+
+- Bound compressed input, effective LSE dimensions, and all decoded sample planes before allocation through `JPEGLSDecoder.Limits`.
+- Reject truncated, concatenated, and trailing codestream data; allow the single legal even-length DICOM pad byte.
+- Publish from the 0.9 stable line without the separate shared-storage release candidate APIs.
+
 ## [0.9.2] - 2026-09-22
 
 ### Fixed
