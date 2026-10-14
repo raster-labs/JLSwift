@@ -131,7 +131,9 @@ public struct JPEGLSContractCodec: Sendable {
                        options: DecodeOptions = DecodeOptions()) throws -> (Image, OperationReport) {
         let started = Date()
         _ = configuration
+        try destination.descriptor.validate(limits: options.resourceLimits)
         let layout = try SharedLayout(descriptor: destination.descriptor, policy: options.copyPolicy)
+        let data = try Self.normalisedInput(data, limits: options.resourceLimits)
         let parsed = try Self.parse(data, limits: options.resourceLimits)
         let frame = parsed.frameHeader
         guard frame.width == layout.width, frame.height == layout.height else {
@@ -206,11 +208,15 @@ public struct JPEGLSContractCodec: Sendable {
 
     // MARK: - Parsing helpers
 
-    private static func parse(_ data: Data, limits: ResourceLimits) throws -> JPEGLSParseResult {
+    private static func normalisedInput(_ data: Data, limits: ResourceLimits) throws -> Data {
         guard data.count <= limits.maximumCompressedBytes else {
             throw CodecError(.resourceLimitExceeded, "Compressed input exceeds the operation budget.")
         }
-        let normalised = data.startIndex == 0 ? data : Data(data)
+        return data.startIndex == 0 ? data : Data(data)
+    }
+
+    private static func parse(_ data: Data, limits: ResourceLimits) throws -> JPEGLSParseResult {
+        let normalised = try normalisedInput(data, limits: limits)
         do {
             return try JPEGLSParser(data: normalised).parse()
         } catch let error as JPEGLSError {

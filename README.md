@@ -46,6 +46,30 @@ Then add JPEGLS as a dependency of your target:
 
 ## JPEGLS Module
 
+### Bounded decoding
+
+`JPEGLSDecoder(limits:)` checks compressed bytes, effective pixel dimensions
+(including LSE extensions), and combined decoded `Int` sample planes before
+sample decoding. Defaults are 64 MiB of input, 16 × 1024 × 1024 pixels per
+component, and 128 MiB of decoded samples. Applications may supply finite limits
+for their supported images. These limits do not bound total process memory or
+parser overhead.
+
+Each component must appear exactly once across the supported scan layout;
+duplicate, missing, or mixed scan layouts are rejected before sample decoding.
+A decode consumes one complete JPEG-LS codestream. The only permitted trailing
+byte is a zero that pads an odd-length codestream to an even length for DICOM.
+Truncated streams, concatenated images, and other trailing data are rejected.
+
+```swift
+let decoder = JPEGLSDecoder(limits: .init(
+    maximumEncodedBytes: 16 << 20,
+    maximumPixels: 4 << 20,
+    maximumDecodedBytes: 32 << 20
+))
+let image = try decoder.decode(encodedData)
+```
+
 **JPEGLS** is a native Swift implementation of JPEG-LS (ISO/IEC 14495-1:1999 / ITU-T.87) compression, designed for the DICOMkit project and optimised for medical imaging workflows.
 
 ### What is JPEG-LS?
