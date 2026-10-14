@@ -48,6 +48,9 @@ jobs:
           set -o pipefail
           swift test --enable-code-coverage 2>&1 | tee test-output.log
 
+      - name: Build optimized release
+        run: swift build -c release -Xswiftc -warnings-as-errors
+
       - name: Check code coverage
         run: |
           CODECOV_JSON=$(swift test --show-codecov-path)
@@ -97,4 +100,14 @@ jobs:
         with:
           name: test-output
           path: test-output.log
+          retention-days: 7
+
+      - name: Upload coverage diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: .build/**/codecov/*.json
+          include-hidden-files: true
+          if-no-files-found: ignore
           retention-days: 7

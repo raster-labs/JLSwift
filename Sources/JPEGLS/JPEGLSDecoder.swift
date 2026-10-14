@@ -131,10 +131,41 @@ public struct JPEGLSDecoder: Sendable {
             )
         }
 
+        let frameHeader = parseResult.frameHeader
+
+        // The sample budget uses the number of frame components. Validate the
+        // complete scan layout before allocating any planes: repeated scans must
+        // not allocate extra planes and only fail the final component-count check.
+        guard let firstScanHeader = parseResult.scanHeaders.first else {
+            throw JPEGLSError.invalidBitstreamStructure(reason: "No scan headers found")
+        }
+        let frameIDs = Set(frameHeader.components.map { $0.id })
+        guard frameIDs.count == frameHeader.componentCount else {
+            throw JPEGLSError.invalidBitstreamStructure(reason: "Duplicate frame component IDs")
+        }
+        let expectedScans = firstScanHeader.interleaveMode == .none ? frameHeader.componentCount : 1
+        guard parseResult.scanHeaders.count == expectedScans else {
+            throw JPEGLSError.invalidBitstreamStructure(
+                reason: "Expected \(expectedScans) scans, found \(parseResult.scanHeaders.count)"
+            )
+        }
+        var scannedIDs = Set<UInt8>()
+        for scan in parseResult.scanHeaders {
+            guard scan.interleaveMode == firstScanHeader.interleaveMode else {
+                throw JPEGLSError.invalidBitstreamStructure(reason: "Mixed scan interleave modes")
+            }
+            for component in scan.components {
+                guard scannedIDs.insert(component.id).inserted else {
+                    throw JPEGLSError.invalidBitstreamStructure(reason: "Duplicate scan component IDs")
+                }
+            }
+        }
+        // Each scan was already checked against the frame by the parser. With
+        // unique IDs and the exact scan count, every component is decoded once.
+
         // Reject dimension products that overflow before any buffer sizing
         // arithmetic runs on them (a crafted LSE type-4 segment can declare
         // axes up to 2^32 − 1 each).
-        let frameHeader = parseResult.frameHeader
         let (pixels, dimensionOverflow) = frameHeader.width.multipliedReportingOverflow(by: frameHeader.height)
         let (samples, sampleOverflow) = pixels.multipliedReportingOverflow(by: frameHeader.componentCount)
         let (bytes, byteOverflow) = samples.multipliedReportingOverflow(by: MemoryLayout<Int>.stride)
@@ -158,11 +189,6 @@ public struct JPEGLSDecoder: Sendable {
             throw JPEGLSError.invalidBitstreamStructure(
                 reason: "Scan data count (\(scanDataList.count)) doesn't match scan header count (\(parseResult.scanHeaders.count))"
             )
-        }
-
-        // Decode based on interleave mode
-        guard let firstScanHeader = parseResult.scanHeaders.first else {
-            throw JPEGLSError.invalidBitstreamStructure(reason: "No scan headers found")
         }
 
         var decodedComponents: [MultiComponentImageData.ComponentData]

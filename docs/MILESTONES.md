@@ -1457,6 +1457,16 @@ Native Swift implementation of JPEG-LS (ISO/IEC 14495-1:1999 / ITU-T.87) compres
 
 ---
 
+## Bounded decoder follow-up
+
+The high-level decoder now admits encoded input and effective LSE dimensions
+against caller-selected limits before allocating sample planes. Supported scans
+must cover frame components exactly once; repeated or mixed scans cannot bypass
+the sample budget. Complete-stream validation rejects truncation, concatenated
+frames, and non-DICOM trailing bytes. Boundary and ownership regression tests
+cover these changes. CI retains coverage diagnostics without weakening its 95%
+threshold. These limits are not a total-process memory guarantee.
+
 ## Summary: JPEG-LS Development Phases
 
 | Milestone | Description | Key Deliverables |
