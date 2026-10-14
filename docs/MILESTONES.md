@@ -1522,3 +1522,21 @@ Native Swift implementation of JPEG-LS (ISO/IEC 14495-1:1999 / ITU-T.87) compres
 
 > **Note**: When updates are made to the codebase, this document and the README must be updated
 > to reflect any changes in milestone progress, new features, or API modifications.
+
+### 0.10.0: Qualified caller-owned monochrome decoding
+
+- Added nonthrowing `inspectMonochromeQualified` and `decodeMonochromeQualified`
+  entry points returning `JPEGLSManagedOutcome` values.
+- Retained the canonical parser and numerical kernels, with scalar headers, a value
+  bit cursor, caller-owned context storage and a value restart consumer.
+- Replaced throwing propagation throughout the qualified canonical call chain
+  with explicit value outcomes, avoiding cold Error witness metadata allocation.
+- Added `JPEGLSManagedFailure` scalar failures and synchronous borrowed
+  `JPEGLSCancellation` callbacks; legacy APIs preserve their existing errors and
+  Task cancellation behaviour.
+- Added sample/restart/mapping parity, capacity canaries, cancellation, independent
+  workspace, nonthrowing interface, entropy failure and parser-retry tests.
+  Full release validation is recorded separately for the final source revision.
+- Recorded source-specific optimised SIL and installed-runtime allocation evidence;
+  caller callback/stack ownership and the selected compiler/runtime remain explicit
+  qualification conditions. Cross-platform release gates remain separate receipts.

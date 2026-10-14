@@ -115,35 +115,8 @@ public struct JPEGLSFrameHeader: Sendable, Equatable {
         componentCount: Int,
         components: [ComponentSpec]
     ) throws {
-        // Validate bits per sample
-        guard bitsPerSample >= 2 && bitsPerSample <= 16 else {
-            throw JPEGLSError.invalidBitsPerSample(bits: bitsPerSample)
-        }
-        
-        // Validate dimensions.
-        // Standard JPEG-LS SOF supports up to 65535 per dimension; dimensions
-        // greater than 65535 use LSE type 4 (extended dimensions) per ITU-T.87 §5.1.1.4.
-        // Maximum supported dimension is 2^32 – 1 (32-bit LSE type 4 encoding).
-        guard width > 0 && height > 0 else {
-            throw JPEGLSError.invalidDimensions(width: width, height: height)
-        }
-        
-        guard width <= 0xFFFF_FFFF && height <= 0xFFFF_FFFF else {
-            throw JPEGLSError.invalidDimensions(width: width, height: height)
-        }
-        
-        // Validate component count
-        guard componentCount >= 1 && componentCount <= 4 else {
-            throw JPEGLSError.invalidComponentCount(count: componentCount)
-        }
-        
-        // Validate components array matches count
-        guard components.count == componentCount else {
-            throw JPEGLSError.invalidFrameHeader(
-                reason: "Component count mismatch: expected \(componentCount), got \(components.count)"
-            )
-        }
-        
+        if let failure = JPEGLSFrameFields.validate(bitsPerSample: bitsPerSample, height: height, width: width,
+            componentCount: componentCount, actualComponentCount: components.count) { throw failure.legacyError }
         self.bitsPerSample = bitsPerSample
         self.height = height
         self.width = width
@@ -151,6 +124,11 @@ public struct JPEGLSFrameHeader: Sendable, Equatable {
         self.components = components
     }
     
+    internal init(validated fields: JPEGLSFrameFields) {
+        bitsPerSample = fields.bitsPerSample; height = fields.height; width = fields.width
+        componentCount = fields.componentCount; components = fields.components.array
+    }
+
     /// Create a frame header for a grayscale image
     ///
     /// - Parameters:

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-14
+
+### Added
+
+- Caller-owned monochrome inspection and decoding through `inspectMonochromeQualified` and `decodeMonochromeQualified`, with nonthrowing scalar outcomes and borrowed cancellation callbacks.
+- Fixed parser and decoder workspace, caller-owned UInt16 output, and capacity, overlap, cancellation, malformed-input, restart, mapping, and workspace-reuse checks.
+
+### Changed
+
+- Reuse the canonical marker grammar and numerical kernels across qualified and legacy APIs. Existing throwing methods retain their error and Task cancellation behavior.
+- Keep compiler/runtime, execution-stack, callback, source and application control-storage qualification explicit; the caller-storage API is not a total-process memory guarantee.
+- Report the library version from the CLI.
+
+### Validation
+
+- Swift 6.2.3: 1,067 tests in 84 suites passed; source line coverage 7,308/7,658 (95.43%); optimized Release passed with warnings treated as errors.
+- Selected Swift 6.4 optimized SIL, assembly and installed macOS runtime paths were reviewed for the caller-storage allocation contract. Other compiler/runtime configurations require their own allocation qualification.
+
 ## [0.9.3] - 2026-10-12
 
 ### Fixed

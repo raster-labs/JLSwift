@@ -38,7 +38,7 @@ public struct JPEGLSRegularModeDecoder: Sendable {
     /// Gradient quantisation lookup table for the inner range (−T3, T3),
     /// indexed by `gradient + gradientTableOffset`. Built in `init` by
     /// evaluating the reference branch chain, so it is bit-identical to it.
-    private let gradientTable: [Int]
+    private let gradientTable: [Int]?
     private let gradientTableOffset: Int
 
     // MARK: - Initialization
@@ -50,14 +50,19 @@ public struct JPEGLSRegularModeDecoder: Sendable {
     ///   - near: Near-lossless parameter (0 for lossless mode)
     /// - Throws: `JPEGLSError.invalidNearParameter` if NEAR is invalid
     public init(parameters: JPEGLSPresetParameters, near: Int = 0) throws {
-        try self.init(parameters: parameters, near: near, usesGradientTable: true)
+        self = try Self.qualified(parameters: parameters, near: near, usesGradientTable: true).legacyValue()
     }
 
-    internal init(parameters: JPEGLSPresetParameters, near: Int,
-                  usesGradientTable: Bool) throws {
+    internal static func qualified(parameters: JPEGLSPresetParameters, near: Int,
+                  usesGradientTable: Bool) -> JPEGLSManagedOutcome<Self> {
         guard near >= 0 && near <= 255 else {
-            throw JPEGLSError.invalidNearParameter(near: near)
+            return .failure(JPEGLSManagedFailure(.invalidNearParameter, near))
         }
+        return .success(Self(validatedParameters: parameters, near: near, usesGradientTable: usesGradientTable))
+    }
+
+    private init(validatedParameters parameters: JPEGLSPresetParameters, near: Int,
+                  usesGradientTable: Bool) {
         
         self.parameters = parameters
         self.near = near
@@ -78,9 +83,9 @@ public struct JPEGLSRegularModeDecoder: Sendable {
         // early exits in `quantizeGradient`).
         let t3 = parameters.threshold3
         self.gradientTableOffset = t3
-        var table = [Int](repeating: 0, count: usesGradientTable ? 2 * t3 + 1 : 0)
-        for i in 0..<table.count {
-            table[i] = Self.quantizeGradientReference(
+        var table: [Int]? = usesGradientTable ? [Int](repeating: 0, count: 2 * t3 + 1) : nil
+        for i in 0..<(table?.count ?? 0) {
+            table![i] = Self.quantizeGradientReference(
                 i - t3,
                 t1: parameters.threshold1, t2: parameters.threshold2,
                 t3: t3, near: near
@@ -149,11 +154,11 @@ public struct JPEGLSRegularModeDecoder: Sendable {
         // pre-computed table (built from the reference branch chain).
         if gradient <= -parameters.threshold3 { return -4 }
         if gradient >= parameters.threshold3 { return 4 }
-        if gradientTable.isEmpty {
+        if gradientTable == nil {
             return Self.quantizeGradientReference(gradient, t1: parameters.threshold1,
                 t2: parameters.threshold2, t3: parameters.threshold3, near: near)
         }
-        return gradientTable[gradient + gradientTableOffset]
+        return gradientTable![gradient + gradientTableOffset]
     }
     
     // MARK: - MED Prediction

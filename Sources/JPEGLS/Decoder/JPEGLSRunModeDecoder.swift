@@ -42,15 +42,23 @@ public struct JPEGLSRunModeDecoder: Sendable {
         near: Int = 0,
         maxRunLength: Int = 65536
     ) throws {
+        self = try Self.qualified(parameters: parameters, near: near, maxRunLength: maxRunLength).legacyValue()
+    }
+
+    internal static func qualified(parameters: JPEGLSPresetParameters,
+        near: Int = 0, maxRunLength: Int = 65536) -> JPEGLSManagedOutcome<Self> {
         guard near >= 0 && near <= 255 else {
-            throw JPEGLSError.invalidNearParameter(near: near)
+            return .failure(JPEGLSManagedFailure(.invalidNearParameter, near))
         }
-        
+        return .success(Self(validatedParameters: parameters, near: near, maxRunLength: maxRunLength))
+    }
+
+    private init(validatedParameters parameters: JPEGLSPresetParameters, near: Int, maxRunLength: Int) {
         self.parameters = parameters
         self.near = near
         self.maxRunLength = maxRunLength
     }
-    
+
     // MARK: - Run Detection
     
     /// Check if run mode should be entered.
@@ -72,10 +80,7 @@ public struct JPEGLSRunModeDecoder: Sendable {
     // MARK: - J[RUNindex] Mapping
     
     /// Standard J table per ITU-T.87 Annex J (Table J.1)
-    private static let jTable: [Int] = [
-        0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3,
-        4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 13, 14, 15
-    ]
+
     
     /// Compute the number of bits for encoding/decoding a run length.
     ///
@@ -85,8 +90,10 @@ public struct JPEGLSRunModeDecoder: Sendable {
     /// - Parameter runIndex: Current run index (0 to 31)
     /// - Returns: Number of bits for run length encoding (J value)
     public func computeJ(runIndex: Int) -> Int {
-        let idx = max(0, min(runIndex, Self.jTable.count - 1))
-        return Self.jTable[idx]
+        let idx = max(0, min(runIndex, 31))
+        if idx < 16 { return idx / 4 }
+        if idx < 24 { return 4 + (idx - 16) / 2 }
+        return idx - 16
     }
     
     // MARK: - Run-Length Decoding

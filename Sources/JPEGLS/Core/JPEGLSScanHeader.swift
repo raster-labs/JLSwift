@@ -62,37 +62,8 @@ public struct JPEGLSScanHeader: Sendable, Equatable {
         interleaveMode: JPEGLSInterleaveMode,
         pointTransform: Int = 0
     ) throws {
-        // Validate component count
-        guard componentCount >= 1 && componentCount <= 4 else {
-            throw JPEGLSError.invalidComponentCount(count: componentCount)
-        }
-        
-        // Validate components array matches count
-        guard components.count == componentCount else {
-            throw JPEGLSError.invalidScanHeader(
-                reason: "Component count mismatch: expected \(componentCount), got \(components.count)"
-            )
-        }
-        
-        // Validate NEAR parameter
-        guard near >= 0 && near <= 255 else {
-            throw JPEGLSError.invalidNearParameter(near: near)
-        }
-        
-        // Validate interleave mode for component count
-        guard interleaveMode.isValid(forComponentCount: componentCount) else {
-            throw JPEGLSError.invalidScanHeader(
-                reason: "Interleave mode \(interleaveMode) invalid for \(componentCount) components"
-            )
-        }
-        
-        // Validate point transform
-        guard pointTransform >= 0 && pointTransform <= 15 else {
-            throw JPEGLSError.invalidScanHeader(
-                reason: "Point transform must be in range [0, 15], got \(pointTransform)"
-            )
-        }
-        
+        if let failure = JPEGLSScanFields.validate(componentCount: componentCount, actualComponentCount: components.count,
+            near: near, interleaveMode: interleaveMode, pointTransform: pointTransform) { throw failure.legacyError }
         self.componentCount = componentCount
         self.components = components
         self.near = near
@@ -100,6 +71,11 @@ public struct JPEGLSScanHeader: Sendable, Equatable {
         self.pointTransform = pointTransform
     }
     
+    internal init(validated fields: JPEGLSScanFields) {
+        componentCount = fields.componentCount; components = fields.components.array
+        near = fields.near; interleaveMode = fields.interleaveMode; pointTransform = fields.pointTransform
+    }
+
     /// Create a scan header for grayscale lossless encoding
     ///
     /// - Returns: Scan header for single component lossless
@@ -145,28 +121,7 @@ public struct JPEGLSScanHeader: Sendable, Equatable {
     /// - Parameter frameHeader: Frame header to validate against
     /// - Throws: `JPEGLSError.parameterMismatch` if incompatible
     public func validate(against frameHeader: JPEGLSFrameHeader) throws {
-        // Check that all component IDs exist in frame
-        for component in components {
-            guard frameHeader.components.contains(where: { $0.id == component.id }) else {
-                throw JPEGLSError.parameterMismatch(
-                    reason: "Scan component ID \(component.id) not found in frame"
-                )
-            }
-        }
-        
-        // For non-interleaved mode, scan must have exactly 1 component
-        if interleaveMode == .none && componentCount != 1 {
-            throw JPEGLSError.parameterMismatch(
-                reason: "Non-interleaved scan must have exactly 1 component, got \(componentCount)"
-            )
-        }
-        
-        // For interleaved modes, all frame components should be in scan
-        if interleaveMode != .none && componentCount != frameHeader.componentCount {
-            throw JPEGLSError.parameterMismatch(
-                reason: "Interleaved scan should include all \(frameHeader.componentCount) components, got \(componentCount)"
-            )
-        }
+        if let failure = JPEGLSScanFields(self).validate(against: JPEGLSFrameFields(frameHeader)) { throw failure.legacyError }
     }
 }
 

@@ -41,37 +41,42 @@ public struct JPEGLSPresetParameters: Sendable, Equatable {
         threshold3: Int,
         reset: Int
     ) throws {
+        self = try Self.qualified(maxValue: maxValue, threshold1: threshold1,
+            threshold2: threshold2, threshold3: threshold3, reset: reset).legacyValue()
+    }
+
+    internal static func qualified(maxValue: Int,
+        threshold1: Int,
+        threshold2: Int,
+        threshold3: Int,
+        reset: Int
+    ) -> JPEGLSManagedOutcome<Self> {
         // Validate parameters according to ITU-T.87 Section 4.2
         guard maxValue >= 1 && maxValue <= 65535 else {
-            throw JPEGLSError.invalidPresetParameters(
-                reason: "MAXVAL must be in range [1, 65535], got \(maxValue)"
-            )
+            return .failure(JPEGLSManagedFailure(.maxValue, maxValue))
         }
         
         guard threshold1 >= 1 && threshold1 <= maxValue else {
-            throw JPEGLSError.invalidPresetParameters(
-                reason: "T1 must be in range [1, MAXVAL], got \(threshold1)"
-            )
+            return .failure(JPEGLSManagedFailure(.threshold1, threshold1))
         }
         
         guard threshold2 >= threshold1 && threshold2 <= maxValue else {
-            throw JPEGLSError.invalidPresetParameters(
-                reason: "T2 must be in range [T1, MAXVAL], got \(threshold2)"
-            )
+            return .failure(JPEGLSManagedFailure(.threshold2, threshold2))
         }
         
         guard threshold3 >= threshold2 && threshold3 <= maxValue else {
-            throw JPEGLSError.invalidPresetParameters(
-                reason: "T3 must be in range [T2, MAXVAL], got \(threshold3)"
-            )
+            return .failure(JPEGLSManagedFailure(.threshold3, threshold3))
         }
         
         guard reset >= 3 && reset <= 255 else {
-            throw JPEGLSError.invalidPresetParameters(
-                reason: "RESET must be in range [3, 255], got \(reset)"
-            )
+            return .failure(JPEGLSManagedFailure(.reset, reset))
         }
         
+        return .success(Self(validatedMaxValue: maxValue, threshold1: threshold1,
+            threshold2: threshold2, threshold3: threshold3, reset: reset))
+    }
+
+    private init(validatedMaxValue maxValue: Int, threshold1: Int, threshold2: Int, threshold3: Int, reset: Int) {
         self.maxValue = maxValue
         self.threshold1 = threshold1
         self.threshold2 = threshold2
@@ -109,8 +114,12 @@ public struct JPEGLSPresetParameters: Sendable, Equatable {
     /// - Returns: Default preset parameters
     /// - Throws: `JPEGLSError.invalidBitsPerSample` if bits per sample is invalid
     public static func defaultParameters(bitsPerSample: Int, near: Int = 0) throws -> JPEGLSPresetParameters {
+        try qualifiedDefaultParameters(bitsPerSample: bitsPerSample, near: near).legacyValue()
+    }
+
+    internal static func qualifiedDefaultParameters(bitsPerSample: Int, near: Int = 0) -> JPEGLSManagedOutcome<JPEGLSPresetParameters> {
         guard bitsPerSample >= 2 && bitsPerSample <= 16 else {
-            throw JPEGLSError.invalidBitsPerSample(bits: bitsPerSample)
+            return .failure(JPEGLSManagedFailure(.invalidBitsPerSample, bitsPerSample))
         }
         
         let maxValue = (1 << bitsPerSample) - 1
@@ -144,7 +153,7 @@ public struct JPEGLSPresetParameters: Sendable, Equatable {
         // Default reset value
         let reset = 64
         
-        return try JPEGLSPresetParameters(
+        return qualified(
             maxValue: maxValue,
             threshold1: threshold1,
             threshold2: threshold2,

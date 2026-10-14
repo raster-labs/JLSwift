@@ -4,7 +4,8 @@ import Foundation
 /// monochrome decode. All variable payloads remain in the caller's encoded span.
 /// Two passes use the same parser: inspect final presets/selectors, then reconstruct
 /// regions while gathering only the selected palette. No restart list is retained.
-internal final class JPEGLSMonochromeParseStorage {
+internal struct JPEGLSMonochromeParseStorage: JPEGLSParseStorage {
+    static let monochrome = true
     private let widths: UnsafeMutableBufferPointer<Int>
     private let values: UnsafeMutableBufferPointer<UInt16>
     private let selectedTable: UInt8?
@@ -12,37 +13,39 @@ internal final class JPEGLSMonochromeParseStorage {
     private(set) var hasMappingTables = false
     private(set) var restartCount = 0
     private(set) var restartOrderValid = true
-    var consumeRegion: ((Range<Int>, UInt8?) throws -> Void)?
+    var consumer: JPEGLSMonochromeRegionConsumer?
 
     init(widths: UnsafeMutableBufferPointer<Int>, values: UnsafeMutableBufferPointer<UInt16>,
-         selectedTable: UInt8? = nil) {
+         selectedTable: UInt8? = nil, consumer: JPEGLSMonochromeRegionConsumer? = nil) {
+        self.consumer = consumer
         self.widths = widths; self.values = values; self.selectedTable = selectedTable
         widths.initialize(repeating: 0)
         values.initialize(repeating: 0)
     }
 
-    func region(_ range: Range<Int>, marker: UInt8?) throws {
+    mutating func region(_ range: Range<Int>, marker: UInt8?) -> JPEGLSManagedFailure? {
         if let marker {
             if marker != JPEGLSMarker.restart0.rawValue + UInt8(restartCount % 8) {
                 restartOrderValid = false
             }
             restartCount += 1
         }
-        try consumeRegion?(range, marker)
+        return consumer?.consume(range, marker: marker)
     }
 
-    func validateRestarts(_ parsed: JPEGLSParseResult) throws {
-        let interval = parsed.scanRestartIntervals.first ?? 0
+    func validateRestarts(_ parsed: JPEGLSParseState) -> JPEGLSManagedFailure? {
+        let interval = parsed.scanRestartInterval
         let height = parsed.frameHeader.height
         let expected = interval > 0 && interval < height ? (height - 1) / interval : 0
         guard restartCount == expected, restartOrderValid else {
-            throw JPEGLSError.invalidBitstreamStructure(reason: "Invalid JPEG-LS restart count or cycle")
+            return JPEGLSManagedFailure(.restartCycle)
         }
+        return nil
     }
 
-    func replaceMapping(id: UInt8, width: Int, range: Range<Int>, reader: JPEGLSBitstreamReader) throws {
+    mutating func replaceMapping(id: UInt8, width: Int, range: Range<Int>, reader: JPEGLSBitstreamCursor) -> JPEGLSManagedFailure? {
         guard id > 0 else {
-            throw JPEGLSError.invalidBitstreamStructure(reason: "Mapping table ID must be in range [1, 255], got 0")
+            return JPEGLSManagedFailure(.mappingID)
         }
         hasMappingTables = true
         widths[Int(id)] = width
@@ -50,18 +53,23 @@ internal final class JPEGLSMonochromeParseStorage {
             mappingCount = 0
             copyEntries(range, width: width, reader: reader)
         }
+        return nil
     }
 
-    func continueMapping(id: UInt8, range: Range<Int>, reader: JPEGLSBitstreamReader) throws {
+    // Borrowed mode historically validates the complete encoded span first.
+    func preflightContinuation(id: UInt8, byteCount: Int) -> JPEGLSManagedFailure? { nil }
+
+    mutating func continueMapping(id: UInt8, range: Range<Int>, reader: JPEGLSBitstreamCursor) -> JPEGLSManagedFailure? {
         let width = widths[Int(id)]
-        if width == 0 { return } // Preserve unknown-table continuation behavior.
+        if width == 0 { return nil } // Preserve unknown-table continuation behavior.
         guard range.count % width == 0 else {
-            throw JPEGLSError.invalidBitstreamStructure(reason: "Mapping table continuation has incomplete entry")
+            return JPEGLSManagedFailure(.mappingContinuation)
         }
         if selectedTable == id { copyEntries(range, width: width, reader: reader) }
+        return nil
     }
 
-    private func copyEntries(_ range: Range<Int>, width: Int, reader: JPEGLSBitstreamReader) {
+    private mutating func copyEntries(_ range: Range<Int>, width: Int, reader: JPEGLSBitstreamCursor) {
         // Samples cannot index beyond 65535. Still validate the complete segment
         // range in the parser, but never expand unreachable palette entries.
         let count = min(range.count / width, values.count - mappingCount)
@@ -72,6 +80,11 @@ internal final class JPEGLSMonochromeParseStorage {
         }
         mappingCount += count
     }
+
+    mutating func scan(_ header: JPEGLSScanFields, interval: Int) {}
+    mutating func scanRange(_ range: Range<Int>) {}
+    mutating func application(_ marker: JPEGLSMarker, range: Range<Int>, reader: JPEGLSBitstreamCursor) {}
+    mutating func comment(_ range: Range<Int>, reader: JPEGLSBitstreamCursor) {}
 
     func mapped(_ sample: UInt16) -> UInt16 {
         Int(sample) < mappingCount ? values[Int(sample)] : sample

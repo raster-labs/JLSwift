@@ -88,18 +88,23 @@ public struct JPEGLSContextModel: Sendable {
     ///   - near: Near-lossless parameter (0 for lossless mode)
     /// - Throws: `JPEGLSError.invalidNearParameter` if NEAR is invalid
     public init(parameters: JPEGLSPresetParameters, near: Int = 0) throws {
-        try self.init(parameters: parameters, near: near, workspace: nil)
+        self = try Self.qualified(parameters: parameters, near: near, workspace: nil).legacyValue()
     }
 
     internal static var workspaceByteCount: Int {
         regularContextCount * MemoryLayout<ContextRecord>.stride + 8 * MemoryLayout<Int>.stride
     }
 
-    internal init(parameters: JPEGLSPresetParameters, near: Int,
-                  workspace: UnsafeMutableRawBufferPointer?) throws {
+    internal static func qualified(parameters: JPEGLSPresetParameters, near: Int,
+                  workspace: UnsafeMutableRawBufferPointer?) -> JPEGLSManagedOutcome<Self> {
         guard near >= 0 && near <= 255 else {
-            throw JPEGLSError.invalidNearParameter(near: near)
+            return .failure(JPEGLSManagedFailure(.invalidNearParameter, near))
         }
+        return .success(Self(validatedParameters: parameters, near: near, workspace: workspace))
+    }
+
+    private init(validatedParameters parameters: JPEGLSPresetParameters, near: Int,
+                  workspace: UnsafeMutableRawBufferPointer?) {
         
         self.parameters = parameters
         self.near = near
@@ -120,25 +125,20 @@ public struct JPEGLSContextModel: Sendable {
         self.bFactor = 2 * near + 1
 
         // Initialize context records to default values per ITU-T.87 Section 4.3
-        func buffer<T>(_ type: T.Type, offset: Int, count: Int) -> UnsafeMutableBufferPointer<T>? {
-            guard let workspace, let base = workspace.baseAddress else { return nil }
-            precondition(workspace.count >= Self.workspaceByteCount)
-            return UnsafeMutableBufferPointer(start: base.advanced(by: offset).bindMemory(to: T.self, capacity: count), count: count)
-        }
         self.contexts = JPEGLSWorkingBuffer(
             repeating: ContextRecord(a: 0, b: 0, c: 0, n: 1), count: Self.regularContextCount,
-            borrowing: buffer(ContextRecord.self, offset: 0, count: Self.regularContextCount))
+            borrowing: Self.buffer(workspace: workspace, ContextRecord.self, offset: 0, count: Self.regularContextCount))
         let runOffset = Self.regularContextCount * MemoryLayout<ContextRecord>.stride
         let pair = 2 * MemoryLayout<Int>.stride
         let riAInit = max(2, (range + 32) / 64)
         self.runInterruptionIndex = JPEGLSWorkingBuffer(repeating: 0, count: 2,
-            borrowing: buffer(Int.self, offset: runOffset, count: 2))
+            borrowing: Self.buffer(workspace: workspace, Int.self, offset: runOffset, count: 2))
         self.runInterruptionA = JPEGLSWorkingBuffer(repeating: riAInit, count: 2,
-            borrowing: buffer(Int.self, offset: runOffset + pair, count: 2))
+            borrowing: Self.buffer(workspace: workspace, Int.self, offset: runOffset + pair, count: 2))
         self.runInterruptionN = JPEGLSWorkingBuffer(repeating: 1, count: 2,
-            borrowing: buffer(Int.self, offset: runOffset + pair * 2, count: 2))
+            borrowing: Self.buffer(workspace: workspace, Int.self, offset: runOffset + pair * 2, count: 2))
         self.runInterruptionNN = JPEGLSWorkingBuffer(repeating: 0, count: 2,
-            borrowing: buffer(Int.self, offset: runOffset + pair * 3, count: 2))
+            borrowing: Self.buffer(workspace: workspace, Int.self, offset: runOffset + pair * 3, count: 2))
         self.runLength = 0
         self.runIndex = 0
         
@@ -146,6 +146,14 @@ public struct JPEGLSContextModel: Sendable {
         initializeContexts()
     }
     
+    /// Bind only storage supplied by the synchronous caller; no capturing closure is retained.
+    private static func buffer<T>(workspace: UnsafeMutableRawBufferPointer?, _ type: T.Type,
+                                  offset: Int, count: Int) -> UnsafeMutableBufferPointer<T>? {
+        guard let workspace, let base = workspace.baseAddress else { return nil }
+        precondition(workspace.count >= workspaceByteCount)
+        return UnsafeMutableBufferPointer(start: base.advanced(by: offset).bindMemory(to: T.self, capacity: count), count: count)
+    }
+
     /// Initialize all context statistics to their default values.
     ///
     /// Per ITU-T.87 Section 4.3, contexts are initialised with:

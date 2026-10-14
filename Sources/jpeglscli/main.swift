@@ -67,7 +67,7 @@ struct JPEGLSCLITool: ParsableCommand {
 
         Use 'jpegls <command> --help' for detailed help on any command.
         """,
-        version: "0.1.0",
+        version: JPEGLS.version,
         subcommands: [Encode.self, Decode.self, Info.self, Verify.self, Batch.self, Compare.self, Convert.self, Benchmark.self, BenchDICOM.self, Completion.self],
         defaultSubcommand: nil
     )
