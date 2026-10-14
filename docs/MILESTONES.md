@@ -1459,6 +1459,12 @@ Native Swift implementation of JPEG-LS (ISO/IEC 14495-1:1999 / ITU-T.87) compres
 
 ## Bounded decoder follow-up
 
+The shared image adapter now explicitly rejects unsupported required backend,
+metadata and progress policies before encoding or consuming a destination, and
+reports optional backend fallback. Inspection and decoding agree on 2–16-bit
+meaningful precision in the supported 16-bit storage layout. Unsupported
+codestream transforms and restart processing are refused before publication.
+
 The high-level decoder now admits encoded input and effective LSE dimensions
 against caller-selected limits before allocating sample planes. Supported scans
 must cover frame components exactly once; repeated or mixed scans cannot bypass

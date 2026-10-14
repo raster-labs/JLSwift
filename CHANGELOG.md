@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — 0.10.1 candidate
 
+- Make shared-contract preflight reject unsupported required backend, metadata,
+  progress and transform policies instead of silently ignoring them. Report
+  preferred-backend fallback and align inspection with 2–16-bit decode precision.
+
 - Reject repeated, missing, or mixed component scans before allocating decoded
   sample planes, so extra scans cannot bypass the sample-storage budget.
 - Revalidate caller-provided destinations against each decode operation's limits

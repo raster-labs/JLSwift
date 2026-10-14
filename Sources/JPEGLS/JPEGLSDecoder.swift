@@ -830,7 +830,7 @@ public struct JPEGLSDecoder: Sendable {
     /// Whether a scan body contains an RSTm marker (0xFF followed by
     /// 0xD0–0xD7, skipping stuffed pairs). Used to reject stray restart
     /// markers in scans that have no active restart interval.
-    private static func scanBodyContainsRestartMarker(_ data: Data) -> Bool {
+    internal static func scanBodyContainsRestartMarker(_ data: Data) -> Bool {
         data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
             var i = 0
             while i + 1 < raw.count {

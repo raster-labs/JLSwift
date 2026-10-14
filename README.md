@@ -48,6 +48,13 @@ Then add JPEGLS as a dependency of your target:
 
 ### Bounded decoding
 
+The shared `JPEGLSContractCodec` surface requires lossless monochrome samples in
+16-bit storage with 2–16 meaningful bits. It rejects required acceleration,
+metadata preservation it cannot implement, and progress callbacks before using
+the destination. Requesting a preferred accelerated backend falls back to scalar
+CPU with an explicit reason in the operation report. `discardAncillary` permits
+dropping optional metadata; required image metadata must not be discarded.
+
 `JPEGLSDecoder(limits:)` checks compressed bytes, effective pixel dimensions
 (including LSE extensions), and combined decoded `Int` sample planes before
 sample decoding. Defaults are 64 MiB of input, 16 × 1024 × 1024 pixels per
