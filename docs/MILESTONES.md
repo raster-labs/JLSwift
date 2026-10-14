@@ -1564,4 +1564,12 @@ threshold. These limits are not a total-process memory guarantee.
   output still uses its image width, and shared destinations keep row padding.
 - Retain nonthrowing marker-fill handling while preserving the stable and release
   candidate histories. Padded-kernel canary and existing contract tests cover the
-  compatibility boundary; current merge validation is pending.
+  compatibility boundary.
+- Reject invalid scan topology before decoded allocation, revalidate destination
+  limits per operation, and normalize sliced input consistently.
+- Enforce shared-contract execution, metadata, progress, transform, restart and
+  precision policies before writing output.
+- Linux Swift 6.2 passed 1,129 tests in 89 suites with 95.86% coverage and optimized
+  Release; Swift 6.2.3 passed 136 focused tests in 10 suites and optimized Release.
+  Both Release builds treat warnings as errors. Exact source and allocation scope
+  are recorded in `ALLOCATION_QUALIFICATION_0.10.1.md`.

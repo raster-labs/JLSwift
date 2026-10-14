@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed — 0.10.1 candidate
+## [0.10.1] - 2026-10-14
+
+### Fixed
 
 - Make shared-contract preflight reject unsupported required backend, metadata,
   progress and transform policies instead of silently ignoring them. Report
@@ -21,8 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nonthrowing caller-owned decoding through one reconstruction kernel.
 - Add scan, arithmetic, padding, storage-lifetime and contract boundary regression
   coverage. CI now retains its coverage report and builds optimized Release with
-  warnings treated as errors. Allocation qualification must be renewed for this
-  changed source before downstream bounded-memory admission.
+  warnings treated as errors.
+
+### Validation
+
+- Linux Swift 6.2: 1,129 tests in 89 suites, 95.86% source coverage, and optimized
+  Release with warnings treated as errors.
+- Swift 6.2.3: 136 focused tests in 10 suites and optimized Release with warnings
+  treated as errors. The focused set covers caller storage, padded rows, parser
+  rejection, scan topology, destination lifetime and contract policies.
+- Source-specific allocation qualification is recorded in
+  `docs/ALLOCATION_QUALIFICATION_0.10.1.md`. Application callback, stack and total
+  resident-storage accounting remain separate integration obligations.
 
 ## [0.10.0] - 2026-10-14
 

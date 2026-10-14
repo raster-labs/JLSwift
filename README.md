@@ -33,7 +33,7 @@ Add JLSwift as a dependency in your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/raster-labs/JLSwift.git", from: "0.10.0")
+    .package(url: "https://github.com/raster-labs/JLSwift.git", from: "0.10.1")
 ]
 ```
 
@@ -129,6 +129,12 @@ also depend on the application's admitted stack, supplied callback and qualified
 compiler/runtime configuration; debugger or profiler hooks are external to the
 codec's storage ownership. The lossless, near-lossless, restart and mapping-table
 semantics remain those of the canonical decoder.
+
+Version 0.10.1 retains both storage APIs and fixes scan-budget, sliced-input and
+per-operation destination-limit checks. Shared-contract decoding rejects
+unsupported policies and transforms before writing. See the
+[allocation qualification](docs/ALLOCATION_QUALIFICATION_0.10.1.md) for the exact
+compiler/runtime scope and source identity.
 
 ### Current Implementation Status
 
