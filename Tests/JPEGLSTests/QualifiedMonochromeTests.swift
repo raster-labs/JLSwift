@@ -115,6 +115,48 @@ struct QualifiedMonochromeTests {
         }
     }
 
+    @Test("Shared reconstruction kernel preserves padded rows and surrounding canaries")
+    func paddedKernelDestination() throws {
+        let data = try encoded()
+        let expected = try legacy(data)
+        let parsed = try JPEGLSParser(data: data).parse()
+        let scan = try #require(parsed.scanHeaders.first)
+        let entropy = try #require(parsed.scanDataRanges.first)
+        let parameters = try parsed.presetParameters ?? JPEGLSPresetParameters.defaultParameters(
+            bitsPerSample: parsed.frameHeader.bitsPerSample, near: scan.near)
+        let (limit, qbppBits) = JPEGLSEncoder().golombLimitForContract(
+            parameters: parameters, near: scan.near, bitsPerSample: parsed.frameHeader.bitsPerSample)
+        withWorkspace { workspace in
+            data.withUnsafeBytes { encoded in
+                for padding in [0, 3, 17] {
+                    let stride = columns + padding
+                    let offset = 5
+                    let extent = (rows - 1) * stride + columns
+                    var output = [UInt16](repeating: canary, count: offset + extent + 7)
+                    output.withUnsafeMutableBufferPointer { buffer in
+                        var reader = JPEGLSBitstreamCursor(
+                            borrowing: UnsafeRawBufferPointer(rebasing: encoded[entropy]))
+                        let destination = UnsafeMutableBufferPointer(rebasing: buffer[offset..<(offset + extent)])
+                        let failure = JPEGLSDecoder().decodeFlatRegionQualified(
+                            reader: &reader, rows: rows, width: columns, rowStride: stride,
+                            parameters: parameters, near: scan.near, limit: limit, qbppBits: qbppBits,
+                            into: destination, workspace: workspace)
+                        #expect(failure == nil)
+                        for index in buffer.indices {
+                            let local = index - offset
+                            if local >= 0, local < extent, local % stride < columns {
+                                let expectedIndex = (local / stride) * columns + local % stride
+                                #expect(Int(buffer[index]) == expected[expectedIndex])
+                            } else {
+                                #expect(buffer[index] == canary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @Test("Qualified mapping retains final replacement semantics")
     func mappingParity() throws {
         let palette = try JPEGLSMappingTable(id: 5, entryWidth: 1, entries: (0..<256).map { 255 - $0 })

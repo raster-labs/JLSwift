@@ -54,6 +54,10 @@ JPEG-LS is a lossless/near-lossless compression standard specifically designed f
 
 ### Qualified caller-owned monochrome decoding
 
+The shared `Image` / `ImageDestination` contract and its padded row layout remain
+available alongside the qualified monochrome APIs. Both decode through the same
+reconstruction kernel; row padding and plane offsets are preserved.
+
 Version 0.10.0 adds `inspectMonochromeQualified` and `decodeMonochromeQualified`.
 They reuse the canonical JPEG-LS parser and numerical kernel with fixed value
 control state, caller-owned sample storage, and caller-owned scratch storage.

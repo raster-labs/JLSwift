@@ -234,7 +234,7 @@ internal struct JPEGLSMonochromeRegionConsumer {
         let destination = UnsafeMutableBufferPointer(rebasing: output[start..<(start + rows * info.width)])
         var reader = JPEGLSBitstreamCursor(borrowing: UnsafeRawBufferPointer(rebasing: encoded[range]),
             cancellation: cancellation)
-        if let failure = decoder.decodeFlatRegionQualified(reader: &reader, rows: rows, width: info.width,
+        if let failure = decoder.decodeFlatRegionQualified(reader: &reader, rows: rows, width: info.width, rowStride: info.width,
             parameters: parameters, near: info.near, limit: limit, qbppBits: qbppBits,
             into: destination, workspace: contextWorkspace) { return failure }
         decodedRows += rows

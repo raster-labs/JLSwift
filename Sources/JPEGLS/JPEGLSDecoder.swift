@@ -890,6 +890,9 @@ public struct JPEGLSDecoder: Sendable {
     /// buffer scoped over the whole region: no nested-array indirection,
     /// no per-access bounds checks, no copy-on-write uniqueness checks
     /// per row, and half the memory traffic of [[Int]].
+    /// Allocating convenience. Decodes into a freshly allocated packed plane by
+    /// calling the same core the caller-destination path uses, so the two
+    /// cannot diverge (MEM-10).
     private func decodeFlatRegion(
         reader: JPEGLSBitstreamReader,
         rows: Int,
@@ -914,11 +917,28 @@ public struct JPEGLSDecoder: Sendable {
         into buf: UnsafeMutableBufferPointer<UInt16>,
         workspace: UnsafeMutableRawBufferPointer?
     ) throws {
-        if let failure = decodeFlatRegionQualified(reader: &reader.cursor, rows: rows, width: width, parameters: parameters, near: near, limit: limit, qbppBits: qbppBits, into: buf, workspace: workspace) { throw failure.legacyError }
+        if let failure = decodeFlatRegionQualified(reader: &reader.cursor, rows: rows, width: width, rowStride: width, parameters: parameters, near: near, limit: limit, qbppBits: qbppBits, into: buf, workspace: workspace) { throw failure.legacyError }
+    }
+
+    /// Preserve the shared image contract's padded-row destination while using
+    /// the same reconstruction kernel as legacy and qualified decoding.
+    internal func decodeFlatRegion(
+        into buffer: UnsafeMutableBufferPointer<UInt16>, rowStride: Int,
+        reader: JPEGLSBitstreamReader, rows: Int, width: Int,
+        parameters: JPEGLSPresetParameters, near: Int, limit: Int, qbppBits: Int
+    ) throws {
+        precondition(rowStride >= width, "row stride cannot be narrower than the image row")
+        precondition(rows == 0 || buffer.count >= (rows - 1) * rowStride + width,
+                     "destination is shorter than the declared layout")
+        if let failure = decodeFlatRegionQualified(reader: &reader.cursor, rows: rows,
+            width: width, rowStride: rowStride, parameters: parameters, near: near,
+            limit: limit, qbppBits: qbppBits, into: buffer, workspace: nil) {
+            throw failure.legacyError
+        }
     }
 
     internal func decodeFlatRegionQualified(
-        reader: inout JPEGLSBitstreamCursor, rows: Int, width: Int,
+        reader: inout JPEGLSBitstreamCursor, rows: Int, width: Int, rowStride: Int,
         parameters: JPEGLSPresetParameters, near: Int, limit: Int, qbppBits: Int,
         into buf: UnsafeMutableBufferPointer<UInt16>,
         workspace: UnsafeMutableRawBufferPointer?
@@ -949,8 +969,8 @@ public struct JPEGLSDecoder: Sendable {
                 if let failure = reader.cancellation.checkpoint() { return failure }
                 // Note: RUNindex is NOT reset per line. Per ITU-T.87 §A.7.1,
                 // RUNindex persists across scan lines; it is only initialised to 0 at scan start.
-                let rowBase = row * width
-                let prevBase = rowBase - width
+                let rowBase = row * rowStride
+                let prevBase = rowBase - rowStride
 
                 // Capture the edge value before this row updates it.
                 let edgeForThisRow = prevRowEdge

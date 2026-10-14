@@ -25,6 +25,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Swift 6.2.3: 1,067 tests in 84 suites passed; source line coverage 7,308/7,658 (95.43%); optimized Release passed with warnings treated as errors.
 - Selected Swift 6.4 optimized SIL, assembly and installed macOS runtime paths were reviewed for the caller-storage allocation contract. Other compiler/runtime configurations require their own allocation qualification.
 
+## [0.10.0-rc.1] — 2026-09-21 (release candidate)
+
+### Added
+
+- **Shared-contract image layer.** A validated `ImageDescriptor`, leased read-only
+  and writable storage with an explicit one-shot lifecycle, `Image`,
+  `ImageDestination`, `ResourceLimits`, `CopyPolicy` and an operation report,
+  wired to the existing codec. Implements the suite's common memory and
+  ownership contract at revision 0.7.0.
+- Under `CopyPolicy.requireSharedStorage` samples stay in the caller's own
+  allocation in both directions, honouring the caller's row stride and plane
+  offset. Padding between the row payload and `rowBytes` is never read or
+  written, so it cannot reach the codestream and caller sentinels survive.
+
+### Changed
+
+- The encode and decode sample stages are now each a single function called by
+  both the ordinary path and the shared-storage path, so the two cannot drift.
+  Output is unchanged: the contract surface encodes byte-identically to the established encoder.
+
+### Notes
+
+The existing public API is untouched and the deployment floor is unchanged;
+this release adds a surface beside it rather than replacing it. The shared
+surface covers the initial shared layout only — one plane, one component,
+unsigned 16-bit, little-endian, even `rowBytes >= width * 2`, no subsampling,
+lossless. Anything else is reported as an incompatibility rather than silently
+converted.
+
+**This is a release candidate, not a stable release.** The suite's release
+gates have not been executed: there is no continuous-integration verification
+(the organisation's Actions billing is locked, so every job reports zero steps
+run), no fuzz campaign, and no benchmark evidence from controlled hardware.
+Everything recorded below was measured on a single developer machine.
+
+**Verified locally:** 1,055 tests in 81 suites pass, of which 1,041 are the
+existing suite unchanged. Byte-identical codestreams at three sizes and three
+row paddings and with a non-zero plane offset. Clean under the address and
+thread sanitizers. Builds on Swift 6.2.4 and 6.4.0.
+
+
 ## [0.9.3] - 2026-10-12
 
 ### Fixed

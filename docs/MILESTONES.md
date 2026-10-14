@@ -1540,3 +1540,12 @@ Native Swift implementation of JPEG-LS (ISO/IEC 14495-1:1999 / ITU-T.87) compres
 - Recorded source-specific optimised SIL and installed-runtime allocation evidence;
   caller callback/stack ownership and the selected compiler/runtime remain explicit
   qualification conditions. Cross-platform release gates remain separate receipts.
+
+### 0.10.1: Main-branch compatibility repair
+
+- Reconcile the shared image contract with the caller-owned monochrome changes.
+  The shared reconstruction kernel accepts explicit row strides; packed qualified
+  output still uses its image width, and shared destinations keep row padding.
+- Retain nonthrowing marker-fill handling while preserving the stable and release
+  candidate histories. Padded-kernel canary and existing contract tests cover the
+  compatibility boundary; current merge validation is pending.

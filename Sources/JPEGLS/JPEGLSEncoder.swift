@@ -271,7 +271,7 @@ public struct JPEGLSEncoder: Sendable {
         }
 
         // Write frame header (SOF55)
-        try writeFrameHeader(encodingData.frameHeader, to: writer)
+        try writeFrameHeaderInternal(encodingData.frameHeader, to: writer)
 
         // Write preset parameters if custom or near-lossless
         if configuration.presetParameters != nil || configuration.near > 0 {
@@ -435,7 +435,7 @@ public struct JPEGLSEncoder: Sendable {
         )
     }
     
-    private func writeFrameHeader(
+    func writeFrameHeaderInternal(
         _ frameHeader: JPEGLSFrameHeader,
         to writer: JPEGLSBitstreamWriter
     ) throws {
@@ -602,7 +602,7 @@ public struct JPEGLSEncoder: Sendable {
         )
         
         // Write scan header (SOS)
-        try writeScanHeader(scanHeader, to: writer)
+        try writeScanHeaderInternal(scanHeader, to: writer)
 
         // Encode scan data
         try encodeScanData(
@@ -615,7 +615,7 @@ public struct JPEGLSEncoder: Sendable {
     }
     
     /// Write scan header (SOS) to bitstream
-    private func writeScanHeader(
+    func writeScanHeaderInternal(
         _ scanHeader: JPEGLSScanHeader,
         to writer: JPEGLSBitstreamWriter
     ) throws {
@@ -677,7 +677,7 @@ public struct JPEGLSEncoder: Sendable {
         )
         
         // Compute Golomb-Rice LIMIT parameters per ITU-T.87 §4.4
-        let (limit, qbppBits) = computeGolombLimit(parameters: parameters, near: scanHeader.near, bitsPerSample: imageData.frameHeader.bitsPerSample)
+        let (limit, qbppBits) = computeGolombLimitInternal(parameters: parameters, near: scanHeader.near, bitsPerSample: imageData.frameHeader.bitsPerSample)
         
         // Encode based on interleave mode
         switch scanHeader.interleaveMode {
@@ -732,7 +732,7 @@ public struct JPEGLSEncoder: Sendable {
     ///   - near: Near-lossless parameter (0 for lossless)
     ///   - bitsPerSample: Original bits per sample from frame header
     /// - Returns: Tuple of (limit, qbppBits)
-    private func computeGolombLimit(
+    func computeGolombLimitInternal(
         parameters: JPEGLSPresetParameters,
         near: Int,
         bitsPerSample: Int
@@ -1084,6 +1084,8 @@ public struct JPEGLSEncoder: Sendable {
     /// boundary semantics (zero previous line), exactly as at scan start.
     /// For a whole-image range this is the plain lossless scan; for restart
     /// encoding each interval is one such range.
+    /// Array convenience. Encodes a packed plane by calling the same core the
+    /// caller-source path uses, so the two cannot diverge.
     private func encodeFlatRowsLossless(
         flat: [UInt16],
         rowRange: Range<Int>,
@@ -1096,13 +1098,38 @@ public struct JPEGLSEncoder: Sendable {
         qbppBits: Int
     ) {
         flat.withUnsafeBufferPointer { buf in
+            encodeFlatRowsLossless(
+                buf: buf, rowStride: width, rowRange: rowRange, width: width,
+                regularMode: regularMode, runMode: runMode, context: &context,
+                writer: writer, limit: limit, qbppBits: qbppBits)
+        }
+    }
+
+    /// The encoder's whole sample-reading path. `rowStride` is in samples and
+    /// may exceed `width`, which is what lets a caller pass their own padded
+    /// plane; samples between `width` and `rowStride` are never read, so
+    /// padding cannot reach the codestream.
+    func encodeFlatRowsLossless(
+        buf: UnsafeBufferPointer<UInt16>,
+        rowStride: Int,
+        rowRange: Range<Int>,
+        width: Int,
+        regularMode: JPEGLSRegularMode,
+        runMode: JPEGLSRunMode,
+        context: inout JPEGLSContextModel,
+        writer: JPEGLSBitstreamWriter,
+        limit: Int,
+        qbppBits: Int
+    ) {
+        precondition(rowStride >= width, "row stride cannot be narrower than the image row")
+        do {
             var prevRowEdge = 0
             let firstRow = rowRange.lowerBound
             for row in rowRange {
                 // Note: RUNindex is NOT reset per line. Per ITU-T.87 §A.7.1,
                 // RUNindex persists across scan lines; it is only initialised to 0 at scan start.
-                let rowBase = row * width
-                let prevBase = rowBase - width
+                let rowBase = row * rowStride
+                let prevBase = rowBase - rowStride
                 let edgeForThisRow = prevRowEdge
                 if row > firstRow {
                     prevRowEdge = Int(buf[prevBase])
