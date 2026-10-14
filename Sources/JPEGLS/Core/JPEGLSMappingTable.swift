@@ -86,6 +86,12 @@ public struct JPEGLSMappingTable: Sendable {
         self.entries = entries
     }
 
+    // Only the canonical parser calls this after checking ID/width and reading
+    // each entry directly at its declared unsigned width.
+    internal init(validatedID: UInt8, entryWidth: Int, entries: [Int]) {
+        id = validatedID; self.entryWidth = entryWidth; self.entries = entries
+    }
+
     // MARK: - Lookup
 
     /// Map a raw decoded pixel value to the corresponding table entry.

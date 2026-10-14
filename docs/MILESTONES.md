@@ -1459,6 +1459,12 @@ Native Swift implementation of JPEG-LS (ISO/IEC 14495-1:1999 / ITU-T.87) compres
 
 ## Bounded decoder follow-up
 
+The shared image adapter now explicitly rejects unsupported required backend,
+metadata and progress policies before encoding or consuming a destination, and
+reports optional backend fallback. Inspection and decoding agree on 2–16-bit
+meaningful precision in the supported 16-bit storage layout. Unsupported
+codestream transforms and restart processing are refused before publication.
+
 The high-level decoder now admits encoded input and effective LSE dimensions
 against caller-selected limits before allocating sample planes. Supported scans
 must cover frame components exactly once; repeated or mixed scans cannot bypass
@@ -1532,3 +1538,38 @@ threshold. These limits are not a total-process memory guarantee.
 
 > **Note**: When updates are made to the codebase, this document and the README must be updated
 > to reflect any changes in milestone progress, new features, or API modifications.
+
+### 0.10.0: Qualified caller-owned monochrome decoding
+
+- Added nonthrowing `inspectMonochromeQualified` and `decodeMonochromeQualified`
+  entry points returning `JPEGLSManagedOutcome` values.
+- Retained the canonical parser and numerical kernels, with scalar headers, a value
+  bit cursor, caller-owned context storage and a value restart consumer.
+- Replaced throwing propagation throughout the qualified canonical call chain
+  with explicit value outcomes, avoiding cold Error witness metadata allocation.
+- Added `JPEGLSManagedFailure` scalar failures and synchronous borrowed
+  `JPEGLSCancellation` callbacks; legacy APIs preserve their existing errors and
+  Task cancellation behaviour.
+- Added sample/restart/mapping parity, capacity canaries, cancellation, independent
+  workspace, nonthrowing interface, entropy failure and parser-retry tests.
+  Full release validation is recorded separately for the final source revision.
+- Recorded source-specific optimised SIL and installed-runtime allocation evidence;
+  caller callback/stack ownership and the selected compiler/runtime remain explicit
+  qualification conditions. Cross-platform release gates remain separate receipts.
+
+### 0.10.1: Main-branch compatibility repair
+
+- Reconcile the shared image contract with the caller-owned monochrome changes.
+  The shared reconstruction kernel accepts explicit row strides; packed qualified
+  output still uses its image width, and shared destinations keep row padding.
+- Retain nonthrowing marker-fill handling while preserving the stable and release
+  candidate histories. Padded-kernel canary and existing contract tests cover the
+  compatibility boundary.
+- Reject invalid scan topology before decoded allocation, revalidate destination
+  limits per operation, and normalize sliced input consistently.
+- Enforce shared-contract execution, metadata, progress, transform, restart and
+  precision policies before writing output.
+- Linux Swift 6.2 passed 1,129 tests in 89 suites with 95.86% coverage and optimized
+  Release; Swift 6.2.3 passed 136 focused tests in 10 suites and optimized Release.
+  Both Release builds treat warnings as errors. Exact source and allocation scope
+  are recorded in `ALLOCATION_QUALIFICATION_0.10.1.md`.

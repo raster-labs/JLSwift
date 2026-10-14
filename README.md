@@ -33,7 +33,7 @@ Add JLSwift as a dependency in your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Raster-Lab/JLSwift.git", from: "0.9.0")
+    .package(url: "https://github.com/raster-labs/JLSwift.git", from: "0.10.1")
 ]
 ```
 
@@ -47,6 +47,13 @@ Then add JPEGLS as a dependency of your target:
 ## JPEGLS Module
 
 ### Bounded decoding
+
+The shared `JPEGLSContractCodec` surface requires lossless monochrome samples in
+16-bit storage with 2–16 meaningful bits. It rejects required acceleration,
+metadata preservation it cannot implement, and progress callbacks before using
+the destination. Requesting a preferred accelerated backend falls back to scalar
+CPU with an explicit reason in the operation report. `discardAncillary` permits
+dropping optional metadata; required image metadata must not be discarded.
 
 `JPEGLSDecoder(limits:)` checks compressed bytes, effective pixel dimensions
 (including LSE extensions), and combined decoded `Int` sample planes before
@@ -75,6 +82,59 @@ let image = try decoder.decode(encodedData)
 ### What is JPEG-LS?
 
 JPEG-LS is a lossless/near-lossless compression standard specifically designed for continuous-tone images. It's widely used in medical imaging (DICOM) due to its excellent compression ratio while maintaining image fidelity—critical for diagnostic accuracy.
+
+### Qualified caller-owned monochrome decoding
+
+The shared `Image` / `ImageDestination` contract and its padded row layout remain
+available alongside the qualified monochrome APIs. Both decode through the same
+reconstruction kernel; row padding and plane offsets are preserved.
+
+Version 0.10.0 adds `inspectMonochromeQualified` and `decodeMonochromeQualified`.
+They reuse the canonical JPEG-LS parser and numerical kernel with fixed value
+control state, caller-owned sample storage, and caller-owned scratch storage.
+The existing `decode`, `inspectMonochrome`, and `decodeMonochrome` APIs remain available.
+
+```swift
+func decodeBorrowed(
+    encoded: UnsafeRawBufferPointer,
+    samples: UnsafeMutableBufferPointer<UInt16>,
+    scratch: UnsafeMutableRawBufferPointer,
+    cancellation: JPEGLSCancellation = .init()
+) -> JPEGLSManagedOutcome<JPEGLSDecoder.MonochromeInfo> {
+    JPEGLSDecoder().decodeMonochromeQualified(
+        encoded, into: samples, workspace: scratch, cancellation: cancellation)
+}
+```
+
+Supply at least `JPEGLSDecoder.monochromeWorkspaceByteCount` bytes of scratch,
+aligned to `MemoryLayout<Int>.alignment`, and enough initialised `UInt16` samples
+for the inspected dimensions. The encoded input, samples and scratch must be
+separate, valid borrows for the entire synchronous call. No pointer escapes.
+The scratch binding may change. Destination samples may be partially written on
+failure or cancellation and must be discarded in that case.
+
+Both qualified methods return `JPEGLSManagedOutcome` with either `.success(info)`
+or `.failure(failure)`. The failure's `code` and scalar operands can be inspected
+without formatting a string. The canonical qualified call chain does not throw,
+including on the first malformed input or cancellation; it does not initialise
+Swift Error witness metadata. Cancellation is an
+optional synchronous C function plus borrowed context in `JPEGLSCancellation`;
+the caller keeps the context alive and synchronises any concurrent changes.
+The qualified methods do not consult Swift Task state. Compatibility methods
+retain Task cancellation and the existing error values.
+
+The codec does not allocate a compressed-data copy, sample matrix, marker list,
+or variable control backing in this path. Whole-operation allocation guarantees
+also depend on the application's admitted stack, supplied callback and qualified
+compiler/runtime configuration; debugger or profiler hooks are external to the
+codec's storage ownership. The lossless, near-lossless, restart and mapping-table
+semantics remain those of the canonical decoder.
+
+Version 0.10.1 retains both storage APIs and fixes scan-budget, sliced-input and
+per-operation destination-limit checks. Shared-contract decoding rejects
+unsupported policies and transforms before writing. See the
+[allocation qualification](docs/ALLOCATION_QUALIFICATION_0.10.1.md) for the exact
+compiler/runtime scope and source identity.
 
 ### Current Implementation Status
 

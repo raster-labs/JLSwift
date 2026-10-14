@@ -49,11 +49,16 @@ public struct JPEGLSContractCodec: Sendable {
     ///
     /// Under `requireSharedStorage` the samples are read directly out of the
     /// caller's allocation, honouring its row stride; no full-frame copy is
-    /// made and no intermediate image is built.
+    /// made and no intermediate image is built. Metadata preservation and progress
+    /// callbacks are not implemented by this synchronous surface and are rejected
+    /// when requested; ancillary metadata may be explicitly discarded.
     public func encode(_ image: Image,
                        configuration: EncoderConfiguration = .default,
                        options: EncodeOptions = EncodeOptions()) throws -> (Data, OperationReport) {
         let started = Date()
+        let fallbackReason = try Self.validatePolicy(options.executionPolicy, hasProgress: options.progress != nil)
+        try Self.validateMetadata(image.metadata, iccProfile: image.descriptor.iccProfile,
+                                  policy: options.metadataPolicy)
         guard configuration.mode == .lossless else {
             throw CodecError(.unsupportedFeature, "This surface encodes the lossless mode only.")
         }
@@ -110,7 +115,7 @@ public struct JPEGLSContractCodec: Sendable {
         writer.writeMarker(.endOfImage)
         let data = try writer.getData()
         let report = OperationReport(
-            backend: .scalarCPU, fidelity: .exactSamples,
+            backend: .scalarCPU, fallbackReason: fallbackReason, fidelity: .exactSamples,
             // No copy events: samples were read in place. Under `allowCopy`
             // this surface still shares, because sharing is always compatible
             // with the shared layout; a conversion would appear here.
@@ -124,12 +129,14 @@ public struct JPEGLSContractCodec: Sendable {
     // MARK: - Decode
 
     /// Decode into the caller's destination, writing final samples straight
-    /// into its allocation (MEM-10).
+    /// into its allocation (MEM-10). Unsupported policies and signalled transforms
+    /// are rejected before the destination's write begins, leaving it reusable.
     @discardableResult
     public func decode(_ data: Data, into destination: ImageDestination,
                        configuration: DecoderConfiguration = DecoderConfiguration(),
                        options: DecodeOptions = DecodeOptions()) throws -> (Image, OperationReport) {
         let started = Date()
+        let fallbackReason = try Self.validatePolicy(options.executionPolicy, hasProgress: options.progress != nil)
         _ = configuration
         try destination.descriptor.validate(limits: options.resourceLimits)
         let layout = try SharedLayout(descriptor: destination.descriptor, policy: options.copyPolicy)
@@ -154,10 +161,32 @@ public struct JPEGLSContractCodec: Sendable {
         guard parsed.scanDataRanges.count == 1 else {
             throw CodecError(.unsupportedFeature, "This surface decodes a single scan.")
         }
+        guard scan.pointTransform == 0, scan.components.allSatisfy({ $0.mappingTableID == 0 }),
+              parsed.colorTransformation == .none else {
+            throw CodecError(.unsupportedFeature, "This surface does not implement sample or colour transforms.")
+        }
+        let restartInterval = parsed.scanRestartIntervals.first ?? 0
+        guard restartInterval == 0 || restartInterval >= frame.height else {
+            throw CodecError(.unsupportedFeature, "This surface does not implement restart-segmented scans.")
+        }
+        if options.metadataPolicy == .preserve,
+           !parsed.applicationMarkers.isEmpty || !parsed.comments.isEmpty {
+            throw CodecError(.unsupportedFeature,
+                "This surface cannot preserve JPEG-LS application or comment metadata.")
+        }
 
         let parameters = try parsed.presetParameters ?? JPEGLSPresetParameters.defaultParameters(
             bitsPerSample: frame.bitsPerSample, near: 0)
+        // Match the legacy decoder's ITU-T.87 C.2.4.1.1 sample-range admission.
+        guard parameters.maxValue <= (1 << frame.bitsPerSample) - 1 else {
+            throw CodecError(.malformedInput, "Preset MAXVAL exceeds the frame's meaningful precision.")
+        }
         let scanData = Data(data[parsed.scanDataRanges[0]])
+        // The flat reconstruction kernel cannot reset contexts at restart markers.
+        // Reject even stray RST markers when DRI is absent or covers the whole image.
+        guard !JPEGLSDecoder.scanBodyContainsRestartMarker(scanData) else {
+            throw CodecError(.unsupportedFeature, "This surface does not implement restart markers.")
+        }
         let reader = JPEGLSBitstreamReader(data: scanData)
         let (limit, qbppBits) = JPEGLSEncoder().golombLimitForContract(
             parameters: parameters, near: 0, bitsPerSample: frame.bitsPerSample)
@@ -185,7 +214,7 @@ public struct JPEGLSContractCodec: Sendable {
         }
 
         let report = OperationReport(
-            backend: .scalarCPU, fidelity: .exactSamples, copyEvents: [],
+            backend: .scalarCPU, fallbackReason: fallbackReason, fidelity: .exactSamples, copyEvents: [],
             pixelAllocationCount: 0, peakPixelBytes: 0,
             // The decoder's own line/context state is bounded per row, not per
             // frame, so no frame-proportional workspace is owned here.
@@ -200,10 +229,39 @@ public struct JPEGLSContractCodec: Sendable {
     public func decode(_ data: Data,
                        configuration: DecoderConfiguration = DecoderConfiguration(),
                        options: DecodeOptions = DecodeOptions()) throws -> (Image, OperationReport) {
+        _ = try Self.validatePolicy(options.executionPolicy, hasProgress: options.progress != nil)
         let descriptor = try inspect(data, limits: options.resourceLimits)
         let destination = try ImageDestination.allocate(
             descriptor: descriptor, limits: options.resourceLimits)
         return try decode(data, into: destination, configuration: configuration, options: options)
+    }
+
+    // MARK: - Policy preflight
+
+    /// Synchronous calls cannot meet the generic-executor callback contract.
+    /// Decline callbacks rather than silently dropping them or invoking them on
+    /// an undocumented executor while the caller's storage is borrowed.
+    private static func validatePolicy(_ policy: ExecutionPolicy, hasProgress: Bool) throws -> String? {
+        if case .required(.accelerated) = policy {
+            throw CodecError(.backendUnavailable, "No accelerated backend is implemented by this surface.")
+        }
+        guard !hasProgress else {
+            throw CodecError(.unsupportedFeature, "Progress callbacks are not implemented by this synchronous surface.")
+        }
+        if case .preferred(.accelerated) = policy {
+            return "The preferred accelerated backend is unavailable; scalar CPU was used."
+        }
+        return nil
+    }
+
+    private static func validateMetadata(_ metadata: ImageMetadata, iccProfile: Data?,
+                                         policy: MetadataPolicy) throws {
+        guard metadata.requiredKeys.isEmpty else {
+            throw CodecError(.unsupportedFeature, "This surface cannot preserve required image metadata.")
+        }
+        if policy == .preserve, !metadata.entries.isEmpty || !(iccProfile?.isEmpty ?? true) {
+            throw CodecError(.unsupportedFeature, "This surface cannot preserve image metadata or ICC profiles.")
+        }
     }
 
     // MARK: - Parsing helpers
@@ -230,9 +288,9 @@ public struct JPEGLSContractCodec: Sendable {
             throw CodecError(.unsupportedFeature,
                 "This surface describes one-component images; codestream has \(frame.componentCount).")
         }
-        guard frame.bitsPerSample > 8, frame.bitsPerSample <= 16 else {
+        guard (2...16).contains(frame.bitsPerSample) else {
             throw CodecError(.unsupportedFeature,
-                "The shared layout is 16-bit storage; codestream is \(frame.bitsPerSample)-bit.")
+                "The shared layout supports 2...16 meaningful bits; codestream is \(frame.bitsPerSample)-bit.")
         }
         return frame
     }

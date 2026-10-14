@@ -72,7 +72,7 @@ public struct JPEGLSDecoder: Sendable {
         }
     }
 
-    private let limits: Limits
+    internal let limits: Limits
 
     /// Initializes a decoder with caller-selected allocation limits.
     public init(limits: Limits = Limits()) { self.limits = limits }
@@ -830,7 +830,7 @@ public struct JPEGLSDecoder: Sendable {
     /// Whether a scan body contains an RSTm marker (0xFF followed by
     /// 0xD0–0xD7, skipping stuffed pairs). Used to reject stray restart
     /// markers in scans that have no active restart interval.
-    private static func scanBodyContainsRestartMarker(_ data: Data) -> Bool {
+    internal static func scanBodyContainsRestartMarker(_ data: Data) -> Bool {
         data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
             var i = 0
             while i + 1 < raw.count {
@@ -929,36 +929,62 @@ public struct JPEGLSDecoder: Sendable {
         qbppBits: Int
     ) throws -> [UInt16] {
         var flat = [UInt16](repeating: 0, count: width * rows)
-        try flat.withUnsafeMutableBufferPointer { buf in
-            try decodeFlatRegion(into: buf, rowStride: width, reader: reader, rows: rows,
-                                 width: width, parameters: parameters, near: near,
-                                 limit: limit, qbppBits: qbppBits)
+        try flat.withUnsafeMutableBufferPointer { buffer in
+            try decodeFlatRegion(reader: reader, rows: rows, width: width,
+                parameters: parameters, near: near, limit: limit, qbppBits: qbppBits,
+                into: buffer, workspace: nil)
         }
         return flat
     }
 
-    /// The decoder's whole final-output path. `rowStride` is in samples and may
-    /// exceed `width`, which is what lets a caller pass their own padded plane;
-    /// bytes between `width` and `rowStride` are never written.
-    func decodeFlatRegion(
+    internal func decodeFlatRegion(
+        reader: JPEGLSBitstreamReader, rows: Int, width: Int,
+        parameters: JPEGLSPresetParameters, near: Int, limit: Int, qbppBits: Int,
         into buf: UnsafeMutableBufferPointer<UInt16>,
-        rowStride: Int,
-        reader: JPEGLSBitstreamReader,
-        rows: Int,
-        width: Int,
-        parameters: JPEGLSPresetParameters,
-        near: Int,
-        limit: Int,
-        qbppBits: Int
+        workspace: UnsafeMutableRawBufferPointer?
+    ) throws {
+        if let failure = decodeFlatRegionQualified(reader: &reader.cursor, rows: rows, width: width, rowStride: width, parameters: parameters, near: near, limit: limit, qbppBits: qbppBits, into: buf, workspace: workspace) { throw failure.legacyError }
+    }
+
+    /// Preserve the shared image contract's padded-row destination while using
+    /// the same reconstruction kernel as legacy and qualified decoding.
+    internal func decodeFlatRegion(
+        into buffer: UnsafeMutableBufferPointer<UInt16>, rowStride: Int,
+        reader: JPEGLSBitstreamReader, rows: Int, width: Int,
+        parameters: JPEGLSPresetParameters, near: Int, limit: Int, qbppBits: Int
     ) throws {
         precondition(rowStride >= width, "row stride cannot be narrower than the image row")
-        precondition(rows == 0 || buf.count >= (rows - 1) * rowStride + width,
+        precondition(rows == 0 || buffer.count >= (rows - 1) * rowStride + width,
                      "destination is shorter than the declared layout")
-        let decoder = try JPEGLSRegularModeDecoder(parameters: parameters, near: near)
-        let runDecoder = try JPEGLSRunModeDecoder(parameters: parameters, near: near)
-        var context = try JPEGLSContextModel(parameters: parameters, near: near)
+        if let failure = decodeFlatRegionQualified(reader: &reader.cursor, rows: rows,
+            width: width, rowStride: rowStride, parameters: parameters, near: near,
+            limit: limit, qbppBits: qbppBits, into: buffer, workspace: nil) {
+            throw failure.legacyError
+        }
+    }
 
-        do {
+    internal func decodeFlatRegionQualified(
+        reader: inout JPEGLSBitstreamCursor, rows: Int, width: Int, rowStride: Int,
+        parameters: JPEGLSPresetParameters, near: Int, limit: Int, qbppBits: Int,
+        into buf: UnsafeMutableBufferPointer<UInt16>,
+        workspace: UnsafeMutableRawBufferPointer?
+    ) -> JPEGLSManagedFailure? {
+        let decoder: JPEGLSRegularModeDecoder
+        switch JPEGLSRegularModeDecoder.qualified(parameters: parameters, near: near,
+                                                  usesGradientTable: workspace == nil) {
+        case .success(let value): decoder = value
+        case .failure(let failure): return failure
+        }
+        let runDecoder: JPEGLSRunModeDecoder
+        switch JPEGLSRunModeDecoder.qualified(parameters: parameters, near: near) {
+        case .success(let value): runDecoder = value
+        case .failure(let failure): return failure
+        }
+        var context: JPEGLSContextModel
+        switch JPEGLSContextModel.qualified(parameters: parameters, near: near, workspace: workspace) {
+        case .success(let value): context = value
+        case .failure(let failure): return failure
+        }
             // Track the left-edge value for boundary Rc at col=0.
             // The edge buffer is previous_line[0], which equals the first pixel
             // of the row decoded two iterations ago (0 for rows 0 and 1).
@@ -966,6 +992,7 @@ public struct JPEGLSDecoder: Sendable {
 
             // Decode pixels in raster order
             for row in 0..<rows {
+                if let failure = reader.cancellation.checkpoint() { return failure }
                 // Note: RUNindex is NOT reset per line. Per ITU-T.87 §A.7.1,
                 // RUNindex persists across scan lines; it is only initialised to 0 at scan start.
                 let rowBase = row * rowStride
@@ -1008,12 +1035,16 @@ public struct JPEGLSDecoder: Sendable {
                         // readRunLength clamps to remainingInLine, so the
                         // fill below cannot overrun the row.
                         let remainingInLine = width - col
-                        let runLength = try readRunLength(
-                            reader: reader,
+                        let runLength: Int
+                        switch readRunLengthQualified(
+                            reader: &reader,
                             runDecoder: runDecoder,
                             context: &context,
                             remainingInLine: remainingInLine
-                        )
+                        ) {
+                        case .success(let value): runLength = value
+                        case .failure(let failure): return failure
+                        }
                         if runLength > 0 {
                             let rv = UInt16(truncatingIfNeeded: a)
                             for i in (rowBase + col)..<(rowBase + col + runLength) {
@@ -1031,9 +1062,13 @@ public struct JPEGLSDecoder: Sendable {
                             let k = context.computeRunInterruptionGolombK(riType: riType)
                             let j = runDecoder.computeJ(runIndex: context.currentRunIndex)
                             let adjustedLimit = limit - j - 1
-                            let eMappedErrorValue = try readGolombCode(
-                                reader: reader, k: k, limit: adjustedLimit, qbppBits: qbppBits
-                            )
+                            let eMappedErrorValue: Int
+                            switch readGolombCodeQualified(
+                                reader: &reader, k: k, limit: adjustedLimit, qbppBits: qbppBits
+                            ) {
+                            case .success(let value): eMappedErrorValue = value
+                            case .failure(let failure): return failure
+                            }
                             let errorValue = context.computeRunInterruptionErrorValue(
                                 temp: eMappedErrorValue + riType, k: k, riType: riType
                             )
@@ -1057,8 +1092,9 @@ public struct JPEGLSDecoder: Sendable {
                         }
                     } else {
                         // Regular mode
-                        let pixel = try decodeSinglePixel(
-                            reader: reader,
+                        let pixel: Int
+                        switch decodeSinglePixelQualified(
+                            reader: &reader,
                             decoder: decoder,
                             runDecoder: runDecoder,
                             context: &context,
@@ -1068,13 +1104,16 @@ public struct JPEGLSDecoder: Sendable {
                             near: near,
                             limit: limit,
                             qbppBits: qbppBits
-                        )
+                        ) {
+                        case .success(let value): pixel = value
+                        case .failure(let failure): return failure
+                        }
                         buf[rowBase + col] = UInt16(truncatingIfNeeded: pixel)
                         col += 1
                     }
                 }
             }
-        }
+        return nil
     }
     
     /// Decode a single line for a component (used for line-interleaved mode)
@@ -1197,6 +1236,21 @@ public struct JPEGLSDecoder: Sendable {
         limit: Int,
         qbppBits: Int
     ) throws -> Int {
+        return try decodeSinglePixelQualified(reader: &reader.cursor, decoder: decoder, runDecoder: runDecoder, context: &context, a: a, b: b, c: c, q1: q1, q2: q2, q3: q3, parameters: parameters, near: near, limit: limit, qbppBits: qbppBits).legacyValue()
+    }
+
+    private func decodeSinglePixelQualified(
+        reader: inout JPEGLSBitstreamCursor,
+        decoder: JPEGLSRegularModeDecoder,
+        runDecoder: JPEGLSRunModeDecoder,
+        context: inout JPEGLSContextModel,
+        a: Int, b: Int, c: Int,
+        q1: Int, q2: Int, q3: Int,
+        parameters: JPEGLSPresetParameters,
+        near: Int,
+        limit: Int,
+        qbppBits: Int
+    ) -> JPEGLSManagedOutcome<Int> {
         // Get context, reusing the quantized gradients the scan loop already
         // computed for the run-mode test. Bias C[Q], Golomb k, and the k=0
         // error correction come from a single context-record load.
@@ -1204,7 +1258,11 @@ public struct JPEGLSDecoder: Sendable {
         let (biasC, k, errorCorrection) = context.pixelCodingState(contextIndex: contextIndex)
 
         // Read Golomb-Rice encoded error
-        let mappedError = try readGolombCode(reader: reader, k: k, limit: limit, qbppBits: qbppBits)
+        let mappedError: Int
+        switch readGolombCodeQualified(reader: &reader, k: k, limit: limit, qbppBits: qbppBits) {
+        case .success(let value): mappedError = value
+        case .failure(let failure): return .failure(failure)
+        }
 
         // Decode pixel using decoder
         let result = decoder.decodePixel(
@@ -1223,7 +1281,7 @@ public struct JPEGLSDecoder: Sendable {
             sign: result.sign
         )
 
-        return result.sample
+        return .success(result.sample)
     }
     
     /// Decode a run of identical pixels
@@ -1328,7 +1386,7 @@ public struct JPEGLSDecoder: Sendable {
     ///   - near: Near-lossless parameter (0 for lossless)
     ///   - bitsPerSample: Original bits per sample from frame header
     /// - Returns: Tuple of (limit, qbppBits)
-    private func computeGolombLimit(
+    internal func computeGolombLimit(
         parameters: JPEGLSPresetParameters,
         near: Int,
         bitsPerSample: Int
@@ -1374,18 +1432,41 @@ public struct JPEGLSDecoder: Sendable {
         limit: Int,
         qbppBits: Int
     ) throws -> Int {
+        return try readGolombCodeQualified(reader: &reader.cursor, k: k, limit: limit, qbppBits: qbppBits).legacyValue()
+    }
+
+    private func readGolombCodeQualified(
+        reader: inout JPEGLSBitstreamCursor,
+        k: Int,
+        limit: Int,
+        qbppBits: Int
+    ) -> JPEGLSManagedOutcome<Int> {
         let limitThreshold = limit - qbppBits - 1
         // Read unary prefix (count zeros until first '1')
-        let unaryCount = try reader.readUnaryCount()
+        let unaryCount: Int
+        switch reader.readUnaryCount() {
+        case .success(let value): unaryCount = value
+        case .failure(let failure): return .failure(failure)
+        }
         // Per ITU-T.87 §6.1.2: when unaryCount >= limitThreshold the encoder used
         // the limited binary code — read qbppBits bits for MErrval − 1.
         if unaryCount >= limitThreshold {
-            let rawValue = Int(try reader.readBits(qbppBits))
-            return rawValue + 1
+            let rawValue: Int
+            switch reader.readBits(qbppBits) {
+            case .success(let value): rawValue = Int(value)
+            case .failure(let failure): return .failure(failure)
+            }
+            return .success(rawValue + 1)
         }
         // Standard Golomb-Rice code
-        let remainder = k > 0 ? Int(try reader.readBits(k)) : 0
-        return (unaryCount << k) | remainder
+        var remainder = 0
+        if k > 0 {
+            switch reader.readBits(k) {
+            case .success(let value): remainder = Int(value)
+            case .failure(let failure): return .failure(failure)
+            }
+        }
+        return .success((unaryCount << k) | remainder)
     }
     
     /// Read run length from bitstream
@@ -1407,6 +1488,15 @@ public struct JPEGLSDecoder: Sendable {
         context: inout JPEGLSContextModel,
         remainingInLine: Int
     ) throws -> Int {
+        return try readRunLengthQualified(reader: &reader.cursor, runDecoder: runDecoder, context: &context, remainingInLine: remainingInLine).legacyValue()
+    }
+
+    private func readRunLengthQualified(
+        reader: inout JPEGLSBitstreamCursor,
+        runDecoder: JPEGLSRunModeDecoder,
+        context: inout JPEGLSContextModel,
+        remainingInLine: Int
+    ) -> JPEGLSManagedOutcome<Int> {
         var runLength = 0
         var runIndex = context.currentRunIndex
         
@@ -1414,7 +1504,11 @@ public struct JPEGLSDecoder: Sendable {
         // Each '1' bit contributes min(2^J[RUNindex], remaining) pixels.
         // run_index is only incremented when a FULL block is used.
         while true {
-            let bit = try reader.readBits(1)
+            let bit: UInt32
+            switch reader.readBits(1) {
+            case .success(let value): bit = value
+            case .failure(let failure): return .failure(failure)
+            }
             if bit == 0 {
                 break  // Run interrupted
             }
@@ -1438,12 +1532,18 @@ public struct JPEGLSDecoder: Sendable {
             // Note: run_index is NOT decremented here; the caller decrements
             // after the interruption pixel is decoded (matching ITU-T.87).
             let j = runDecoder.computeJ(runIndex: runIndex)
-            let remainder = j > 0 ? Int(try reader.readBits(j)) : 0
+            var remainder = 0
+            if j > 0 {
+                switch reader.readBits(j) {
+                case .success(let value): remainder = Int(value)
+                case .failure(let failure): return .failure(failure)
+                }
+            }
             runLength += remainder
         }
         
         context.setRunIndex(runIndex)
-        return min(runLength, remainingInLine)
+        return .success(min(runLength, remainingInLine))
     }
     
     // MARK: - Helper Methods

@@ -7,16 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-14
+
 ### Fixed
 
-- **Fill bytes before markers** (also released as 0.9.2 on the 0.9 line).
-  ITU-T T.81 B.1.1.2 (inherited by T.87) allows any number of 0xFF fill bytes
-  before a marker. CharLS (DCMTK `dcmcjpls`) writes one before EOI whenever the
-  entropy coder's final byte is 0xFF, and the parser read `FF FF D9` as an
-  unknown marker with a length field, failing with "premature end of bitstream"
-  on such single-row DICOM frames. `JPEGLSParser` and
-  `JPEGLSBitstreamReader.readMarker` now skip fill bytes; the scan body already
-  excluded them. Regression tests carry the CharLS streams.
+- Make shared-contract preflight reject unsupported required backend, metadata,
+  progress and transform policies instead of silently ignoring them. Report
+  preferred-backend fallback and align inspection with 2–16-bit decode precision.
+
+- Reject repeated, missing, or mixed component scans before allocating decoded
+  sample planes, so extra scans cannot bypass the sample-storage budget.
+- Revalidate caller-provided destinations against each decode operation's limits
+  and use the same byte origin when parsing and decoding sliced `Data`.
+- Preserve main's shared image contract and padded-row destinations alongside
+  nonthrowing caller-owned decoding through one reconstruction kernel.
+- Add scan, arithmetic, padding, storage-lifetime and contract boundary regression
+  coverage. CI now retains its coverage report and builds optimized Release with
+  warnings treated as errors.
+
+### Validation
+
+- Linux Swift 6.2: 1,129 tests in 89 suites, 95.86% source coverage, and optimized
+  Release with warnings treated as errors.
+- Swift 6.2.3: 136 focused tests in 10 suites and optimized Release with warnings
+  treated as errors. The focused set covers caller storage, padded rows, parser
+  rejection, scan topology, destination lifetime and contract policies.
+- Source-specific allocation qualification is recorded in
+  `docs/ALLOCATION_QUALIFICATION_0.10.1.md`. Application callback, stack and total
+  resident-storage accounting remain separate integration obligations.
+
+## [0.10.0] - 2026-10-14
+
+### Added
+
+- Caller-owned monochrome inspection and decoding through `inspectMonochromeQualified` and `decodeMonochromeQualified`, with nonthrowing scalar outcomes and borrowed cancellation callbacks.
+- Fixed parser and decoder workspace, caller-owned UInt16 output, and capacity, overlap, cancellation, malformed-input, restart, mapping, and workspace-reuse checks.
+
+### Changed
+
+- Reuse the canonical marker grammar and numerical kernels across qualified and legacy APIs. Existing throwing methods retain their error and Task cancellation behavior.
+- Keep compiler/runtime, execution-stack, callback, source and application control-storage qualification explicit; the caller-storage API is not a total-process memory guarantee.
+- Report the library version from the CLI.
+
+### Validation
+
+- Swift 6.2.3: 1,067 tests in 84 suites passed; source line coverage 7,308/7,658 (95.43%); optimized Release passed with warnings treated as errors.
+- Selected Swift 6.4 optimized SIL, assembly and installed macOS runtime paths were reviewed for the caller-storage allocation contract. Other compiler/runtime configurations require their own allocation qualification.
 
 ## [0.10.0-rc.1] — 2026-09-21 (release candidate)
 
@@ -58,6 +94,27 @@ existing suite unchanged. Byte-identical codestreams at three sizes and three
 row paddings and with a non-zero plane offset. Clean under the address and
 thread sanitizers. Builds on Swift 6.2.4 and 6.4.0.
 
+
+## [0.9.3] - 2026-10-12
+
+### Fixed
+
+- Bound compressed input, effective LSE dimensions, and all decoded sample planes before allocation through `JPEGLSDecoder.Limits`.
+- Reject truncated, concatenated, and trailing codestream data; allow the single legal even-length DICOM pad byte.
+- Publish from the 0.9 stable line without the separate shared-storage release candidate APIs.
+
+## [0.9.2] - 2026-09-22
+
+### Fixed
+
+- **Fill bytes before markers.** ITU-T T.81 B.1.1.2 (inherited by T.87) allows
+  any number of 0xFF fill bytes before a marker. CharLS (DCMTK `dcmcjpls`)
+  writes one before EOI whenever the entropy coder's final byte is 0xFF, and
+  the parser read `FF FF D9` as an unknown marker with a length field, failing
+  with "premature end of bitstream" on such single-row DICOM frames.
+  `JPEGLSParser` and `JPEGLSBitstreamReader.readMarker` now skip fill bytes;
+  the scan body already excluded them. Regression tests carry the CharLS
+  streams.
 
 ## [0.9.0] - 2026-06-11
 

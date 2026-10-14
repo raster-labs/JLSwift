@@ -22,12 +22,14 @@ import Foundation
 ///   it realigns the position to the byte boundary after the last consumed
 ///   bit. Mixing the two modes without a reset reads ahead of the logical
 ///   position.
-public final class JPEGLSBitstreamReader {
-    private let bytes: [UInt8]
+internal struct JPEGLSBitstreamCursor {
+    let cancellation: JPEGLSCancellation
+    private let bytes: JPEGLSReadBytes
     /// Index of the next byte to load (bit reads) or read directly (byte reads).
     /// Bit-level refill advances this eagerly; the unconsumed bits live in
     /// `bitBuffer`/`bitsInBuffer`.
     private var position: Int
+    private var nextCancellationCheckpoint = 65_536
     /// Bit accumulator. The low `bitsInBuffer` bits below previously-consumed
     /// garbage are valid; consumption only decrements `bitsInBuffer` (matching
     /// the historical extract-by-shift-and-mask behaviour).
@@ -43,14 +45,37 @@ public final class JPEGLSBitstreamReader {
     /// Initialize reader with data buffer
     ///
     /// - Parameter data: Input data to read from
-    public init(data: Data) {
-        self.bytes = [UInt8](data)
+    init(data: Data) {
+        cancellation = .init()
+        self.bytes = JPEGLSReadBytes(data: data)
         self.position = 0
         self.bitBuffer = 0
         self.bitsInBuffer = 0
         self.bitRegionStart = 0
         self.bitsConsumedInRegion = 0
     }
+
+    /// Internal synchronous borrow. The caller keeps the input immutable and alive.
+    init(borrowing bytes: UnsafeRawBufferPointer, cancellation: JPEGLSCancellation = .init()) {
+        self.cancellation = cancellation
+        self.bytes = JPEGLSReadBytes(borrowing: bytes)
+        position = 0; bitBuffer = 0; bitsInBuffer = 0
+        bitRegionStart = 0; bitsConsumedInRegion = 0
+    }
+
+    /// Advance over an encoded range without copying its contents.
+    internal mutating func readRange(_ count: Int) -> JPEGLSManagedOutcome<Range<Int>> {
+        if let failure = cancellation.checkpoint() { return .failure(failure) }
+        guard count >= 0, count <= bytes.count - position else {
+            return .failure(JPEGLSManagedFailure(.prematureEndOfStream))
+        }
+        let start = position
+        position += count
+        return .success(start..<position)
+    }
+
+    internal func byte(at position: Int) -> UInt8 { bytes[position] }
+    internal func copy(_ range: Range<Int>) -> Data { bytes.copy(range) }
 
     /// Current read position in bytes
     public var currentPosition: Int {
@@ -70,38 +95,50 @@ public final class JPEGLSBitstreamReader {
     /// Read a single byte from the stream
     ///
     /// - Returns: The byte value
-    /// - Throws: `JPEGLSError.prematureEndOfStream` if no data available
-    public func readByte() throws -> UInt8 {
+    /// - Failure: `JPEGLSManagedFailure(.prematureEndOfStream)` if no data available
+    public mutating func readByte() -> JPEGLSManagedOutcome<UInt8> {
+        if bytes.isBorrowed, position >= nextCancellationCheckpoint {
+            if let failure = cancellation.checkpoint() { return .failure(failure) }
+            nextCancellationCheckpoint = position > Int.max - 65_536 ? Int.max : position + 65_536
+        }
         guard position < bytes.count else {
-            throw JPEGLSError.prematureEndOfStream
+            return .failure(JPEGLSManagedFailure(.prematureEndOfStream))
         }
         let byte = bytes[position]
         position += 1
-        return byte
+        return .success(byte)
     }
 
     /// Read multiple bytes from the stream
     ///
     /// - Parameter count: Number of bytes to read
     /// - Returns: Data containing the bytes
-    /// - Throws: `JPEGLSError.prematureEndOfStream` if not enough data
-    public func readBytes(_ count: Int) throws -> Data {
-        guard count >= 0, position + count <= bytes.count else {
-            throw JPEGLSError.prematureEndOfStream
+    /// - Failure: `JPEGLSManagedFailure(.prematureEndOfStream)` if not enough data
+    public mutating func readBytes(_ count: Int) -> JPEGLSManagedOutcome<Data> {
+        let range: Range<Int>
+        switch readRange(count) {
+        case .success(let value): range = value
+        case .failure(let failure): return .failure(failure)
         }
-        let result = Data(bytes[position..<position + count])
-        position += count
-        return result
+        return .success(bytes.copy(range))
     }
 
     /// Read a 16-bit big-endian value
     ///
     /// - Returns: The 16-bit value
-    /// - Throws: `JPEGLSError.prematureEndOfStream` if not enough data
-    public func readUInt16() throws -> UInt16 {
-        let byte1 = try readByte()
-        let byte2 = try readByte()
-        return (UInt16(byte1) << 8) | UInt16(byte2)
+    /// - Failure: `JPEGLSManagedFailure(.prematureEndOfStream)` if not enough data
+    public mutating func readUInt16() -> JPEGLSManagedOutcome<UInt16> {
+        let byte1: UInt8
+        switch readByte() {
+        case .success(let value): byte1 = value
+        case .failure(let failure): return .failure(failure)
+        }
+        let byte2: UInt8
+        switch readByte() {
+        case .success(let value): byte2 = value
+        case .failure(let failure): return .failure(failure)
+        }
+        return .success((UInt16(byte1) << 8) | UInt16(byte2))
     }
 
     /// Peek at the next byte without advancing position
@@ -120,22 +157,33 @@ public final class JPEGLSBitstreamReader {
     /// code; they are skipped here.
     ///
     /// - Returns: The marker
-    /// - Throws: `JPEGLSError` if marker is invalid or not found
-    public func readMarker() throws -> JPEGLSMarker {
-        let byte1 = try readByte()
+    /// - Failure: `JPEGLSError` if marker is invalid or not found
+    public mutating func readMarker() -> JPEGLSManagedOutcome<JPEGLSMarker> {
+        let byte1: UInt8
+        switch readByte() {
+        case .success(let value): byte1 = value
+        case .failure(let failure): return .failure(failure)
+        }
         guard byte1 == JPEGLSMarker.markerPrefix else {
-            throw JPEGLSError.invalidMarker(byte1: byte1, byte2: 0)
+            return .failure(JPEGLSManagedFailure(.invalidMarker, Int(byte1), 0))
         }
 
-        var byte2 = try readByte()
+        var byte2: UInt8
+        switch readByte() {
+        case .success(let value): byte2 = value
+        case .failure(let failure): return .failure(failure)
+        }
         while byte2 == JPEGLSMarker.markerPrefix {
-            byte2 = try readByte()
+            switch readByte() {
+            case .success(let value): byte2 = value
+            case .failure(let failure): return .failure(failure)
+            }
         }
         guard let marker = JPEGLSMarker(rawValue: byte2) else {
-            throw JPEGLSError.invalidMarker(byte1: byte1, byte2: byte2)
+            return .failure(JPEGLSManagedFailure(.invalidMarker, Int(byte1), Int(byte2)))
         }
 
-        return marker
+        return .success(marker)
     }
 
     /// Skip to the next marker in the stream
@@ -145,20 +193,24 @@ public final class JPEGLSBitstreamReader {
     /// stuffed byte and the pair is skipped.
     ///
     /// - Returns: The marker found
-    /// - Throws: `JPEGLSError` if no marker found before end of stream
-    public func findNextMarker() throws -> JPEGLSMarker {
+    /// - Failure: `JPEGLSError` if no marker found before end of stream
+    public mutating func findNextMarker() -> JPEGLSManagedOutcome<JPEGLSMarker> {
         while !isAtEnd {
-            let byte = try readByte()
+            let byte: UInt8
+            switch readByte() {
+            case .success(let value): byte = value
+            case .failure(let failure): return .failure(failure)
+            }
             if byte == JPEGLSMarker.markerPrefix {
                 if let nextByte = peekByte(), nextByte >= 0x80 {
                     // MSB = 1: real marker
                     position -= 1  // Back up to re-read the 0xFF
-                    return try readMarker()
+                    return readMarker()
                 }
                 // MSB = 0: stuffed byte, skip and continue
             }
         }
-        throw JPEGLSError.prematureEndOfStream
+        return .failure(JPEGLSManagedFailure(.prematureEndOfStream))
     }
 
     // MARK: - Bit-level reading
@@ -170,7 +222,7 @@ public final class JPEGLSBitstreamReader {
     /// - 0xFF followed by a byte ≥ 0x80 (marker) or at end of data:
     ///   the 0xFF alone contributes 8 bits.
     @inline(__always)
-    private func refill() {
+    private mutating func refill() {
         if bitsInBuffer == 0 && bitsConsumedInRegion == 0 {
             bitRegionStart = position
         }
@@ -218,16 +270,20 @@ public final class JPEGLSBitstreamReader {
     ///
     /// - Parameter count: Number of bits to read (1-32)
     /// - Returns: The bits as a UInt32
-    /// - Throws: `JPEGLSError.prematureEndOfStream` if not enough data
-    public func readBits(_ count: Int) throws -> UInt32 {
+    /// - Failure: `JPEGLSManagedFailure(.prematureEndOfStream)` if not enough data
+    public mutating func readBits(_ count: Int) -> JPEGLSManagedOutcome<UInt32> {
+        if bytes.isBorrowed, position >= nextCancellationCheckpoint {
+            if let failure = cancellation.checkpoint() { return .failure(failure) }
+            nextCancellationCheckpoint = position > Int.max - 65_536 ? Int.max : position + 65_536
+        }
         guard count > 0 && count <= 32 else {
-            throw JPEGLSError.internalError(reason: "Invalid bit count: \(count)")
+            return .failure(JPEGLSManagedFailure(.bitCount, count))
         }
 
         if bitsInBuffer < count {
             refill()
             guard bitsInBuffer >= count else {
-                throw JPEGLSError.prematureEndOfStream
+                return .failure(JPEGLSManagedFailure(.prematureEndOfStream))
             }
         }
 
@@ -239,7 +295,7 @@ public final class JPEGLSBitstreamReader {
         bitsInBuffer -= count
         bitsConsumedInRegion += count
 
-        return bits
+        return .success(bits)
     }
 
     /// Read a unary prefix: zero or more '0' bits terminated by a single '1'
@@ -249,15 +305,19 @@ public final class JPEGLSBitstreamReader {
     /// per bit.
     ///
     /// - Returns: The number of '0' bits before the terminating '1'
-    /// - Throws: `JPEGLSError.prematureEndOfStream` if the stream ends
+    /// - Failure: `JPEGLSManagedFailure(.prematureEndOfStream)` if the stream ends
     ///   before a '1' bit is found
-    public func readUnaryCount() throws -> Int {
+    public mutating func readUnaryCount() -> JPEGLSManagedOutcome<Int> {
         var count = 0
         while true {
+            if bytes.isBorrowed, position >= nextCancellationCheckpoint {
+                if let failure = cancellation.checkpoint() { return .failure(failure) }
+                nextCancellationCheckpoint = position > Int.max - 65_536 ? Int.max : position + 65_536
+            }
             if bitsInBuffer == 0 {
                 refill()
                 guard bitsInBuffer > 0 else {
-                    throw JPEGLSError.prematureEndOfStream
+                    return .failure(JPEGLSManagedFailure(.prematureEndOfStream))
                 }
             }
             let window = alignedWindow()
@@ -266,7 +326,7 @@ public final class JPEGLSBitstreamReader {
                 // Found the terminating '1': consume the zeros and the 1.
                 bitsInBuffer -= zeros + 1
                 bitsConsumedInRegion += zeros + 1
-                return count + zeros
+                return .success(count + zeros)
             }
             // Every buffered bit is 0 — consume them all and keep scanning.
             count += bitsInBuffer
@@ -281,7 +341,7 @@ public final class JPEGLSBitstreamReader {
     /// the boundary following the last consumed bit, replaying the §9.1
     /// stuffing rule over the buffered region (a stuffed 0xFF pair counts as
     /// two bytes carrying 15 bits).
-    public func resetBitBuffer() {
+    public mutating func resetBitBuffer() {
         if bitsConsumedInRegion > 0 {
             var pos = bitRegionStart
             var remaining = bitsConsumedInRegion
@@ -307,15 +367,59 @@ public final class JPEGLSBitstreamReader {
     /// Seek to a specific position in the stream
     ///
     /// - Parameter position: Target position in bytes
-    /// - Throws: `JPEGLSError` if position is invalid
-    public func seek(to position: Int) throws {
+    /// - Failure: `JPEGLSError` if position is invalid
+    public mutating func seek(to position: Int) -> JPEGLSManagedFailure? {
         guard position >= 0 && position <= bytes.count else {
-            throw JPEGLSError.internalError(reason: "Invalid seek position: \(position)")
+            return JPEGLSManagedFailure(.seekPosition, position)
         }
         bitBuffer = 0
         bitsInBuffer = 0
         bitsConsumedInRegion = 0
         self.position = position
         bitRegionStart = position
+        return nil
+    }
+}
+
+/// Reference-semantics compatibility adapter over the canonical value cursor.
+public final class JPEGLSBitstreamReader {
+    internal var cursor: JPEGLSBitstreamCursor
+    public init(data: Data) { cursor = JPEGLSBitstreamCursor(data: data) }
+    internal init(borrowing bytes: UnsafeRawBufferPointer) {
+        cursor = JPEGLSBitstreamCursor(borrowing: bytes, cancellation: .task)
+    }
+    public var currentPosition: Int { cursor.currentPosition }
+    public var bytesRemaining: Int { cursor.bytesRemaining }
+    public var isAtEnd: Bool { cursor.isAtEnd }
+    public func peekByte() -> UInt8? { cursor.peekByte() }
+    public func resetBitBuffer() { cursor.resetBitBuffer() }
+    internal func byte(at position: Int) -> UInt8 { cursor.byte(at: position) }
+    internal func copy(_ range: Range<Int>) -> Data { cursor.copy(range) }
+    internal func readRange(_ count: Int) throws -> Range<Int> {
+        return try cursor.readRange(count).legacyValue()
+    }
+    public func readByte() throws -> UInt8 {
+        return try cursor.readByte().legacyValue()
+    }
+    public func readBytes(_ count: Int) throws -> Data {
+        return try cursor.readBytes(count).legacyValue()
+    }
+    public func readUInt16() throws -> UInt16 {
+        return try cursor.readUInt16().legacyValue()
+    }
+    public func readMarker() throws -> JPEGLSMarker {
+        return try cursor.readMarker().legacyValue()
+    }
+    public func findNextMarker() throws -> JPEGLSMarker {
+        return try cursor.findNextMarker().legacyValue()
+    }
+    public func readBits(_ count: Int) throws -> UInt32 {
+        return try cursor.readBits(count).legacyValue()
+    }
+    public func readUnaryCount() throws -> Int {
+        return try cursor.readUnaryCount().legacyValue()
+    }
+    public func seek(to position: Int) throws {
+        if let failure = cursor.seek(to: position) { throw failure.legacyError }
     }
 }
