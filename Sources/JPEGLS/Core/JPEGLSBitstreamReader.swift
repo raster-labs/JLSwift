@@ -23,11 +23,12 @@ import Foundation
 ///   bit. Mixing the two modes without a reset reads ahead of the logical
 ///   position.
 public final class JPEGLSBitstreamReader {
-    private let bytes: [UInt8]
+    private let bytes: JPEGLSReadBytes
     /// Index of the next byte to load (bit reads) or read directly (byte reads).
     /// Bit-level refill advances this eagerly; the unconsumed bits live in
     /// `bitBuffer`/`bitsInBuffer`.
     private var position: Int
+    private var nextCancellationCheckpoint = 65_536
     /// Bit accumulator. The low `bitsInBuffer` bits below previously-consumed
     /// garbage are valid; consumption only decrements `bitsInBuffer` (matching
     /// the historical extract-by-shift-and-mask behaviour).
@@ -44,13 +45,34 @@ public final class JPEGLSBitstreamReader {
     ///
     /// - Parameter data: Input data to read from
     public init(data: Data) {
-        self.bytes = [UInt8](data)
+        self.bytes = JPEGLSReadBytes(data: data)
         self.position = 0
         self.bitBuffer = 0
         self.bitsInBuffer = 0
         self.bitRegionStart = 0
         self.bitsConsumedInRegion = 0
     }
+
+    /// Internal synchronous borrow. The caller keeps the input immutable and alive.
+    internal init(borrowing bytes: UnsafeRawBufferPointer) {
+        self.bytes = JPEGLSReadBytes(borrowing: bytes)
+        position = 0; bitBuffer = 0; bitsInBuffer = 0
+        bitRegionStart = 0; bitsConsumedInRegion = 0
+    }
+
+    /// Advance over an encoded range without copying its contents.
+    internal func readRange(_ count: Int) throws -> Range<Int> {
+        if bytes.isBorrowed { try Task.checkCancellation() }
+        guard count >= 0, count <= bytes.count - position else {
+            throw JPEGLSError.prematureEndOfStream
+        }
+        let start = position
+        position += count
+        return start..<position
+    }
+
+    internal func byte(at position: Int) -> UInt8 { bytes[position] }
+    internal func copy(_ range: Range<Int>) -> Data { bytes.copy(range) }
 
     /// Current read position in bytes
     public var currentPosition: Int {
@@ -72,6 +94,10 @@ public final class JPEGLSBitstreamReader {
     /// - Returns: The byte value
     /// - Throws: `JPEGLSError.prematureEndOfStream` if no data available
     public func readByte() throws -> UInt8 {
+        if bytes.isBorrowed, position >= nextCancellationCheckpoint {
+            try Task.checkCancellation()
+            nextCancellationCheckpoint = position > Int.max - 65_536 ? Int.max : position + 65_536
+        }
         guard position < bytes.count else {
             throw JPEGLSError.prematureEndOfStream
         }
@@ -86,12 +112,8 @@ public final class JPEGLSBitstreamReader {
     /// - Returns: Data containing the bytes
     /// - Throws: `JPEGLSError.prematureEndOfStream` if not enough data
     public func readBytes(_ count: Int) throws -> Data {
-        guard count >= 0, position + count <= bytes.count else {
-            throw JPEGLSError.prematureEndOfStream
-        }
-        let result = Data(bytes[position..<position + count])
-        position += count
-        return result
+        let range = try readRange(count)
+        return bytes.copy(range)
     }
 
     /// Read a 16-bit big-endian value

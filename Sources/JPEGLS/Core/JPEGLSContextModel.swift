@@ -29,33 +29,33 @@ public struct JPEGLSContextModel: Sendable {
     /// load and store (one bounds check, one copy-on-write uniqueness
     /// check, one cache line) instead of up to ten accesses across four
     /// parallel arrays.
-    private struct ContextRecord: Sendable {
+    private struct ContextRecord: BitwiseCopyable, Sendable {
         var a: Int
         var b: Int
         var c: Int
         var n: Int
     }
 
-    private var contexts: [ContextRecord]
+    private var contexts: JPEGLSWorkingBuffer<ContextRecord>
     
     // MARK: - Run-Length State
     
     /// Run interruption context index array (J[])
     /// Used for run-length encoding context selection.
-    private var runInterruptionIndex: [Int]
+    private var runInterruptionIndex: JPEGLSWorkingBuffer<Int>
     
     /// Run interruption accumulated absolute error (A_ri) per ITU-T.87 §4.5.3.
     /// Index 0 = RItype 0 (Ra ≠ Rb), Index 1 = RItype 1 (Ra ≈ Rb).
-    private var runInterruptionA: [Int]
+    private var runInterruptionA: JPEGLSWorkingBuffer<Int>
     
     /// Run interruption sample count (N_ri) per ITU-T.87 §4.5.3.
     /// Index 0 = RItype 0, Index 1 = RItype 1.
-    private var runInterruptionN: [Int]
+    private var runInterruptionN: JPEGLSWorkingBuffer<Int>
     
     /// Run interruption negative error count (nn) per ITU-T.87.
     /// Used for map computation in run interruption coding.
     /// Index 0 = RItype 0, Index 1 = RItype 1.
-    private var runInterruptionNN: [Int]
+    private var runInterruptionNN: JPEGLSWorkingBuffer<Int>
     
     /// Current run length counter
     private var runLength: Int
@@ -88,6 +88,15 @@ public struct JPEGLSContextModel: Sendable {
     ///   - near: Near-lossless parameter (0 for lossless mode)
     /// - Throws: `JPEGLSError.invalidNearParameter` if NEAR is invalid
     public init(parameters: JPEGLSPresetParameters, near: Int = 0) throws {
+        try self.init(parameters: parameters, near: near, workspace: nil)
+    }
+
+    internal static var workspaceByteCount: Int {
+        regularContextCount * MemoryLayout<ContextRecord>.stride + 8 * MemoryLayout<Int>.stride
+    }
+
+    internal init(parameters: JPEGLSPresetParameters, near: Int,
+                  workspace: UnsafeMutableRawBufferPointer?) throws {
         guard near >= 0 && near <= 255 else {
             throw JPEGLSError.invalidNearParameter(near: near)
         }
@@ -111,19 +120,25 @@ public struct JPEGLSContextModel: Sendable {
         self.bFactor = 2 * near + 1
 
         // Initialize context records to default values per ITU-T.87 Section 4.3
-        self.contexts = Array(
-            repeating: ContextRecord(a: 0, b: 0, c: 0, n: 1),
-            count: Self.regularContextCount
-        )
-        
-        // Initialize run-length state
-        self.runInterruptionIndex = Array(repeating: 0, count: Self.runContextCount)
-        // Initialise run interruption statistics per ITU-T.87 §4.5.3.
-        // Two contexts: index 0 for RItype=0, index 1 for RItype=1.
+        func buffer<T>(_ type: T.Type, offset: Int, count: Int) -> UnsafeMutableBufferPointer<T>? {
+            guard let workspace, let base = workspace.baseAddress else { return nil }
+            precondition(workspace.count >= Self.workspaceByteCount)
+            return UnsafeMutableBufferPointer(start: base.advanced(by: offset).bindMemory(to: T.self, capacity: count), count: count)
+        }
+        self.contexts = JPEGLSWorkingBuffer(
+            repeating: ContextRecord(a: 0, b: 0, c: 0, n: 1), count: Self.regularContextCount,
+            borrowing: buffer(ContextRecord.self, offset: 0, count: Self.regularContextCount))
+        let runOffset = Self.regularContextCount * MemoryLayout<ContextRecord>.stride
+        let pair = 2 * MemoryLayout<Int>.stride
         let riAInit = max(2, (range + 32) / 64)
-        self.runInterruptionA = [riAInit, riAInit]
-        self.runInterruptionN = [1, 1]
-        self.runInterruptionNN = [0, 0]
+        self.runInterruptionIndex = JPEGLSWorkingBuffer(repeating: 0, count: 2,
+            borrowing: buffer(Int.self, offset: runOffset, count: 2))
+        self.runInterruptionA = JPEGLSWorkingBuffer(repeating: riAInit, count: 2,
+            borrowing: buffer(Int.self, offset: runOffset + pair, count: 2))
+        self.runInterruptionN = JPEGLSWorkingBuffer(repeating: 1, count: 2,
+            borrowing: buffer(Int.self, offset: runOffset + pair * 2, count: 2))
+        self.runInterruptionNN = JPEGLSWorkingBuffer(repeating: 0, count: 2,
+            borrowing: buffer(Int.self, offset: runOffset + pair * 3, count: 2))
         self.runLength = 0
         self.runIndex = 0
         

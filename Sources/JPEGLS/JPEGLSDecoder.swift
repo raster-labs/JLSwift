@@ -72,7 +72,7 @@ public struct JPEGLSDecoder: Sendable {
         }
     }
 
-    private let limits: Limits
+    internal let limits: Limits
 
     /// Initializes a decoder with caller-selected allocation limits.
     public init(limits: Limits = Limits()) { self.limits = limits }
@@ -899,12 +899,25 @@ public struct JPEGLSDecoder: Sendable {
         limit: Int,
         qbppBits: Int
     ) throws -> [UInt16] {
-        let decoder = try JPEGLSRegularModeDecoder(parameters: parameters, near: near)
-        let runDecoder = try JPEGLSRunModeDecoder(parameters: parameters, near: near)
-        var context = try JPEGLSContextModel(parameters: parameters, near: near)
         var flat = [UInt16](repeating: 0, count: width * rows)
+        try flat.withUnsafeMutableBufferPointer { buffer in
+            try decodeFlatRegion(reader: reader, rows: rows, width: width,
+                parameters: parameters, near: near, limit: limit, qbppBits: qbppBits,
+                into: buffer, workspace: nil)
+        }
+        return flat
+    }
 
-        try flat.withUnsafeMutableBufferPointer { buf in
+    internal func decodeFlatRegion(
+        reader: JPEGLSBitstreamReader, rows: Int, width: Int,
+        parameters: JPEGLSPresetParameters, near: Int, limit: Int, qbppBits: Int,
+        into buf: UnsafeMutableBufferPointer<UInt16>,
+        workspace: UnsafeMutableRawBufferPointer?
+    ) throws {
+        let decoder = try JPEGLSRegularModeDecoder(parameters: parameters, near: near,
+                                                  usesGradientTable: workspace == nil)
+        let runDecoder = try JPEGLSRunModeDecoder(parameters: parameters, near: near)
+        var context = try JPEGLSContextModel(parameters: parameters, near: near, workspace: workspace)
             // Track the left-edge value for boundary Rc at col=0.
             // The edge buffer is previous_line[0], which equals the first pixel
             // of the row decoded two iterations ago (0 for rows 0 and 1).
@@ -912,6 +925,7 @@ public struct JPEGLSDecoder: Sendable {
 
             // Decode pixels in raster order
             for row in 0..<rows {
+                if workspace != nil { try Task.checkCancellation() }
                 // Note: RUNindex is NOT reset per line. Per ITU-T.87 §A.7.1,
                 // RUNindex persists across scan lines; it is only initialised to 0 at scan start.
                 let rowBase = row * width
@@ -1020,9 +1034,6 @@ public struct JPEGLSDecoder: Sendable {
                     }
                 }
             }
-        }
-
-        return flat
     }
     
     /// Decode a single line for a component (used for line-interleaved mode)
@@ -1276,7 +1287,7 @@ public struct JPEGLSDecoder: Sendable {
     ///   - near: Near-lossless parameter (0 for lossless)
     ///   - bitsPerSample: Original bits per sample from frame header
     /// - Returns: Tuple of (limit, qbppBits)
-    private func computeGolombLimit(
+    internal func computeGolombLimit(
         parameters: JPEGLSPresetParameters,
         near: Int,
         bitsPerSample: Int

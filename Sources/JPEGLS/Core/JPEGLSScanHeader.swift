@@ -146,9 +146,8 @@ public struct JPEGLSScanHeader: Sendable, Equatable {
     /// - Throws: `JPEGLSError.parameterMismatch` if incompatible
     public func validate(against frameHeader: JPEGLSFrameHeader) throws {
         // Check that all component IDs exist in frame
-        let frameComponentIDs = Set(frameHeader.components.map { $0.id })
         for component in components {
-            guard frameComponentIDs.contains(component.id) else {
+            guard frameHeader.components.contains(where: { $0.id == component.id }) else {
                 throw JPEGLSError.parameterMismatch(
                     reason: "Scan component ID \(component.id) not found in frame"
                 )

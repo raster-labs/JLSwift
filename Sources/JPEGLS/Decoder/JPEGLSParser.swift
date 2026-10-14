@@ -106,14 +106,21 @@ public struct JPEGLSParseResult: Sendable {
 /// Validates marker sequence and extracts all necessary metadata for decoding.
 public final class JPEGLSParser {
     private let reader: JPEGLSBitstreamReader
+    private let borrowedStorage: JPEGLSMonochromeParseStorage?
     
     /// Initialize parser with encoded data
     ///
     /// - Parameter data: JPEG-LS encoded data
     public init(data: Data) {
         self.reader = JPEGLSBitstreamReader(data: data)
+        self.borrowedStorage = nil
     }
     
+    internal init(borrowing bytes: UnsafeRawBufferPointer, storage: JPEGLSMonochromeParseStorage) {
+        reader = JPEGLSBitstreamReader(borrowing: bytes)
+        borrowedStorage = storage
+    }
+
     /// Parse the JPEG-LS bitstream
     ///
     /// Validates the structure and extracts all metadata.
@@ -143,6 +150,7 @@ public final class JPEGLSParser {
 
         // Parse marker segments until EOI
         while !reader.isAtEnd {
+            if borrowedStorage != nil { try Task.checkCancellation() }
             // Read marker bytes manually to handle unknown markers
             let byte1 = try reader.readByte()
             guard byte1 == JPEGLSMarker.markerPrefix else {
@@ -181,7 +189,7 @@ public final class JPEGLSParser {
                         )
                     }
                     let skipLength = Int(length) - 2
-                    _ = try reader.readBytes(skipLength)
+                    _ = try reader.readRange(skipLength)
                     continue
                 }
             }
@@ -235,6 +243,9 @@ public final class JPEGLSParser {
                         reason: "SOS marker found before SOF"
                     )
                 }
+                if borrowedStorage != nil, !scanHeaders.isEmpty {
+                    throw JPEGLSError.invalidBitstreamStructure(reason: "Monochrome decoding requires one scan")
+                }
                 let scanHeader = try parseScanHeader(frameHeader: frame)
                 scanHeaders.append(scanHeader)
                 // Record the restart interval in effect at this SOS (a DRI
@@ -247,6 +258,7 @@ public final class JPEGLSParser {
                 // Per ISO 14495-1 §9.1, a byte following 0xFF with MSB = 0 (value < 0x80)
                 // is a stuffed byte; with MSB = 1 (value ≥ 0x80) it is a real marker.
                 let scanStart = reader.currentPosition
+                var regionStart = scanStart
                 var scanEnd: Int? = nil
                 while !reader.isAtEnd {
                     let byte = try reader.readByte()
@@ -258,7 +270,10 @@ public final class JPEGLSParser {
                                 // Restart marker (FFD0–FFD7) inside the scan
                                 // body: part of the entropy-coded segment, not
                                 // a scan terminator. Consume and continue.
+                                let regionEnd = reader.currentPosition - 1
                                 _ = try reader.readByte()
+                                try borrowedStorage?.region(regionStart..<regionEnd, marker: nextByte)
+                                regionStart = reader.currentPosition
                                 continue
                             }
                             if nextByte >= 0x80 {
@@ -276,7 +291,9 @@ public final class JPEGLSParser {
                         }
                     }
                 }
-                scanDataRanges.append(scanStart..<(scanEnd ?? reader.currentPosition))
+                let end = scanEnd ?? reader.currentPosition
+                scanDataRanges.append(scanStart..<end)
+                try borrowedStorage?.region(regionStart..<end, marker: nil)
                 
             case .jpegLSExtension:
                 // Parse JPEG-LS extension
@@ -294,26 +311,23 @@ public final class JPEGLSParser {
                  .applicationMarker9, .applicationMarker10, .applicationMarker11,
                  .applicationMarker12, .applicationMarker13, .applicationMarker14,
                  .applicationMarker15:
-                // Parse application marker payload
-                let data = try parseMarkerSegment()
-                applicationMarkers.append((marker: marker, data: data))
-                // APP8 "mrfx" carries the colour-transform identifier per ISO/IEC 14495-2 Annex A.
-                // Format: 4-byte identifier "mrfx" followed by 1-byte transform ID.
-                // Use startIndex-relative indexing because the Data may be a slice whose
-                // startIndex is not zero.
-                if marker == .applicationMarker8 && data.count >= 5 {
-                    let i = data.startIndex
-                    if data[i] == 0x6D && data[i + 1] == 0x72 && data[i + 2] == 0x66 && data[i + 3] == 0x78 {
-                        if let ct = JPEGLSColorTransformation(rawValue: data[i + 4]) {
-                            colorTransformation = ct
-                        }
+                let range = try parseMarkerRange()
+                if borrowedStorage == nil {
+                    applicationMarkers.append((marker: marker, data: reader.copy(range)))
+                }
+                // Inspect the existing APP8 signal in place; no payload copy.
+                if marker == .applicationMarker8, range.count >= 5 {
+                    let i = range.lowerBound
+                    if reader.byte(at: i) == 0x6D && reader.byte(at: i + 1) == 0x72 &&
+                       reader.byte(at: i + 2) == 0x66 && reader.byte(at: i + 3) == 0x78,
+                       let ct = JPEGLSColorTransformation(rawValue: reader.byte(at: i + 4)) {
+                        colorTransformation = ct
                     }
                 }
-                
+
             case .comment:
-                // Parse comment
-                let data = try parseMarkerSegment()
-                comments.append(data)
+                let range = try parseMarkerRange()
+                if borrowedStorage == nil { comments.append(reader.copy(range)) }
                 
             case .restart0, .restart1, .restart2, .restart3,
                  .restart4, .restart5, .restart6, .restart7:
@@ -330,7 +344,7 @@ public final class JPEGLSParser {
                 // unknown (Y=0) at SOF time. Frame dimensions are already known from the
                 // SOF marker in typical usage, so the DNL payload is consumed but not
                 // applied. Full DNL-based dimension update is deferred to a future milestone.
-                _ = try parseMarkerSegment()
+                _ = try parseMarkerRange()
                 
             case .startOfImage:
                 throw JPEGLSError.invalidBitstreamStructure(
@@ -357,7 +371,7 @@ public final class JPEGLSParser {
     }
     
     /// Parse a generic marker segment with length field
-    private func parseMarkerSegment() throws -> Data {
+    private func parseMarkerRange() throws -> Range<Int> {
         let length = try reader.readUInt16()
         guard length >= 2 else {
             throw JPEGLSError.invalidBitstreamStructure(
@@ -366,7 +380,7 @@ public final class JPEGLSParser {
         }
         // Length includes the 2 bytes of the length field itself
         let dataLength = Int(length) - 2
-        return try reader.readBytes(dataLength)
+        return try reader.readRange(dataLength)
     }
     
     /// Parse frame header (SOF marker segment)
@@ -385,6 +399,9 @@ public final class JPEGLSParser {
         
         // Read component count
         let componentCount = Int(try reader.readByte())
+        if borrowedStorage != nil, componentCount != 1 {
+            throw JPEGLSError.invalidBitstreamStructure(reason: "Monochrome decoding requires one component")
+        }
         
         // Validate expected length
         let expectedLength = 2 + 1 + 2 + 2 + 1 + (componentCount * 3)
@@ -427,6 +444,9 @@ public final class JPEGLSParser {
         
         // Read component count in this scan
         let componentCount = Int(try reader.readByte())
+        if borrowedStorage != nil, componentCount != 1 {
+            throw JPEGLSError.invalidBitstreamStructure(reason: "Monochrome decoding requires one component")
+        }
         
         // Validate expected length
         let expectedLength = 2 + 1 + (componentCount * 2) + 3
@@ -499,7 +519,7 @@ public final class JPEGLSParser {
         guard let extensionType = JPEGLSExtensionType(rawValue: extensionTypeByte) else {
             // Unknown extension type - skip the rest
             let skipLength = Int(length) - 3  // Length includes itself (2) and type (1)
-            _ = try reader.readBytes(skipLength)
+            _ = try reader.readRange(skipLength)
             return
         }
         
@@ -550,6 +570,11 @@ public final class JPEGLSParser {
                     reason: "Mapping table data length \(dataBytes) not a multiple of entry width \(entryWidth)"
                 )
             }
+            if let borrowedStorage {
+                let range = try reader.readRange(dataBytes)
+                try borrowedStorage.replaceMapping(id: tableID, width: entryWidth, range: range, reader: reader)
+                return
+            }
             let entryCount = dataBytes / entryWidth
             var entries: [Int] = []
             entries.reserveCapacity(entryCount)
@@ -575,9 +600,14 @@ public final class JPEGLSParser {
             let tableID = try reader.readByte()
             // data bytes = length - 4 (subtract: 2 for Ll, 1 for Id, 1 for TID)
             let dataBytes = Int(length) - 4
+            if let borrowedStorage {
+                let range = try reader.readRange(dataBytes)
+                try borrowedStorage.continueMapping(id: tableID, range: range, reader: reader)
+                return
+            }
             guard let existingTable = mappingTables[tableID] else {
                 // No existing table — skip the data gracefully
-                _ = try reader.readBytes(dataBytes)
+                _ = try reader.readRange(dataBytes)
                 return
             }
             let entryWidth = existingTable.entryWidth
@@ -620,7 +650,7 @@ public final class JPEGLSParser {
                 // Unsupported or malformed — skip remaining bytes gracefully.
                 let skipLength = remainingBytes - 1
                 if skipLength > 0 {
-                    _ = try reader.readBytes(skipLength)
+                    _ = try reader.readRange(skipLength)
                 }
                 return
             }
