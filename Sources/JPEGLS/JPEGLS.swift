@@ -4,5 +4,5 @@
 /// for medical imaging, optimized for Apple Silicon.
 public struct JPEGLS {
     /// The version of the JPEGLS library
-    public static let version = "0.10.0"
+    public static let version = "0.10.1"
 }

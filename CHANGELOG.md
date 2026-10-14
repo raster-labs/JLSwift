@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — 0.10.1 candidate
+
+- Reject repeated, missing, or mixed component scans before allocating decoded
+  sample planes, so extra scans cannot bypass the sample-storage budget.
+- Revalidate caller-provided destinations against each decode operation's limits
+  and use the same byte origin when parsing and decoding sliced `Data`.
+- Preserve main's shared image contract and padded-row destinations alongside
+  nonthrowing caller-owned decoding through one reconstruction kernel.
+- Add scan, arithmetic, padding, storage-lifetime and contract boundary regression
+  coverage. CI now retains its coverage report and builds optimized Release with
+  warnings treated as errors. Allocation qualification must be renewed for this
+  changed source before downstream bounded-memory admission.
+
 ## [0.10.0] - 2026-10-14
 
 ### Added
